@@ -38,7 +38,8 @@
 - [x] Add signature support (global + per-platform config, plus CLI overrides) for LinkedIn and X.
 - [x] Add `file_sha256` + `text_sha256` tracking in output and publish logs.
 - [x] Document and enforce `media.write` scope requirement for X image posts.
-- [ ] Add X token tooling parity commands (`auth x token-status`, `auth x token-refresh`).
+- [x] Add X token tooling parity commands (`auth x token-status`, `auth x token-refresh`).
+- [x] Add X manual auth exchange fallback (`auth x exchange`).
 - [ ] Integrate X into scheduler flow and retry/idempotency behavior.
 
 ## Phase 3 - Media (Images)
@@ -103,3 +104,10 @@
 
 - [ ] Build and test release binaries for macOS, Linux, and Windows.
 - [ ] Add release packaging notes for external developers (checksums, naming, changelog).
+
+## Backlog - Convenience UX
+
+- [ ] Add one-liner multi-platform command:
+  - Example: `outbox "Failure is part of building things."`
+  - Behavior: publish same text to all enabled/configured platforms.
+  - Output: per-platform success/failure JSON summary.

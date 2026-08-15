@@ -24,6 +24,7 @@ use urlencoding::encode;
 
 const DEFAULT_LINKEDIN_VERSION: &str = "202601";
 const OAUTH_STATE_PATH: &str = ".outbox/linkedin_oauth_state";
+const X_OAUTH_STATE_PATH: &str = ".outbox/x_oauth_state";
 const PUBLISH_LOG_PATH: &str = ".outbox/publish-log.jsonl";
 const ENV_PATH: &str = ".env";
 const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read media.write offline.access";
@@ -129,6 +130,9 @@ struct AuthXArgs {
 #[derive(Debug, Subcommand)]
 enum AuthXCommand {
     Login,
+    Exchange(AuthXExchangeArgs),
+    TokenStatus,
+    TokenRefresh,
 }
 
 #[derive(Debug, Args)]
@@ -137,6 +141,16 @@ struct AuthLinkedinExchangeArgs {
     code: String,
     #[arg(long)]
     state: String,
+}
+
+#[derive(Debug, Args)]
+struct AuthXExchangeArgs {
+    #[arg(long)]
+    code: String,
+    #[arg(long)]
+    state: String,
+    #[arg(long)]
+    code_verifier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +225,15 @@ struct SuccessOutput {
 #[derive(Debug, Deserialize, Serialize)]
 struct OAuthState {
     state: String,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct XOAuthState {
+    state: String,
+    code_verifier: String,
+    client_id: String,
+    redirect_uri: String,
     created_at: String,
 }
 
@@ -537,6 +560,7 @@ struct LinkedinAuth {
 #[derive(Debug)]
 struct XAuth {
     access_token: String,
+    refresh_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -584,6 +608,9 @@ async fn main() -> ExitCode {
             },
             AuthPlatform::X(args) => match args.command {
                 AuthXCommand::Login => start_x_login(&config).await,
+                AuthXCommand::Exchange(args) => exchange_x_code_manual(args, &config).await,
+                AuthXCommand::TokenStatus => show_x_token_status(),
+                AuthXCommand::TokenRefresh => run_x_token_refresh(&config).await,
             },
         },
     };
@@ -760,6 +787,13 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
     let state = generate_state(32);
     let code_verifier = generate_code_verifier(64);
     let code_challenge = pkce_code_challenge(&code_verifier);
+    save_x_oauth_state(&XOAuthState {
+        state: state.clone(),
+        code_verifier: code_verifier.clone(),
+        client_id: client_id.clone(),
+        redirect_uri: redirect_uri.clone(),
+        created_at: Utc::now().to_rfc3339(),
+    })?;
 
     let auth_url = format!(
         "https://twitter.com/i/oauth2/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
@@ -847,6 +881,131 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
     }
 }
 
+async fn exchange_x_code_manual(
+    args: AuthXExchangeArgs,
+    config: &RuntimeConfig,
+) -> Result<Value, AppError> {
+    let state_file = load_x_oauth_state().ok();
+    if let Some(s) = &state_file {
+        if s.state != args.state {
+            return Err(AppError::Validation {
+                message: "X OAuth state mismatch.".to_string(),
+                suggestion: Some("Use state returned from latest login/auth URL.".to_string()),
+                command: Some("outbox auth x login".to_string()),
+            });
+        }
+    }
+
+    let client_id = env_non_empty("X_CLIENT_ID")
+        .or_else(|| state_file.as_ref().map(|s| s.client_id.clone()))
+        .ok_or(AppError::MissingAuth {
+            message: "X_CLIENT_ID is missing.".to_string(),
+            suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
+            command: Some("outbox auth x exchange --code <code> --state <state>".to_string()),
+        })?;
+    let redirect_uri = env_non_empty("X_REDIRECT_URI")
+        .or_else(|| state_file.as_ref().map(|s| s.redirect_uri.clone()))
+        .ok_or(AppError::MissingAuth {
+            message: "X_REDIRECT_URI is missing.".to_string(),
+            suggestion: Some("Set X_REDIRECT_URI in .env to match X app callback URL.".to_string()),
+            command: Some("outbox auth x exchange --code <code> --state <state>".to_string()),
+        })?;
+    let code_verifier = args
+        .code_verifier
+        .or_else(|| state_file.as_ref().map(|s| s.code_verifier.clone()))
+        .ok_or(AppError::Validation {
+            message: "Missing PKCE code verifier.".to_string(),
+            suggestion: Some(
+                "Use --code-verifier or run outbox auth x login first so verifier is saved."
+                    .to_string(),
+            ),
+            command: Some("outbox auth x login".to_string()),
+        })?;
+    let client_secret = env_non_empty("X_CLIENT_SECRET");
+
+    let auth_result = exchange_x_code_for_token(
+        args.code,
+        &client_id,
+        client_secret.as_deref(),
+        &redirect_uri,
+        &code_verifier,
+        config.connect_timeout,
+        config.request_timeout,
+    )
+    .await?;
+
+    clear_x_oauth_state_file();
+
+    Ok(json!({
+        "ok": true,
+        "platform": "x",
+        "mode": "auth_x_exchange",
+        "access_token_saved": true,
+        "refresh_token_saved": auth_result.refresh_token_saved,
+        "access_token_expires_in": auth_result.access_token_expires_in,
+        "scope": auth_result.scope,
+        "token_type": auth_result.token_type,
+        "next": {
+            "message": "X auth exchange completed. You can publish now.",
+            "command": "outbox publish x --file <path>"
+        }
+    }))
+}
+
+fn show_x_token_status() -> Result<Value, AppError> {
+    Ok(json!({
+        "ok": true,
+        "platform": "x",
+        "mode": "auth_token_status",
+        "access_token_present": env_non_empty("X_ACCESS_TOKEN").is_some(),
+        "refresh_token_present": env_non_empty("X_REFRESH_TOKEN").is_some(),
+        "access_token_expires_in": env_non_empty("X_ACCESS_TOKEN_EXPIRES_IN"),
+        "scopes": env_non_empty("X_SCOPES").or_else(|| env_non_empty("X_SCOPE")),
+        "token_type": env_non_empty("X_TOKEN_TYPE")
+    }))
+}
+
+async fn run_x_token_refresh(config: &RuntimeConfig) -> Result<Value, AppError> {
+    let refresh_token = env_non_empty("X_REFRESH_TOKEN").ok_or(AppError::MissingAuth {
+        message: "No X refresh token found.".to_string(),
+        suggestion: Some(
+            "Run outbox auth x login with offline.access scope, then retry token-refresh."
+                .to_string(),
+        ),
+        command: Some("outbox auth x token-status".to_string()),
+    })?;
+    let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
+        message: "X_CLIENT_ID is missing.".to_string(),
+        suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
+        command: Some("outbox auth x token-refresh".to_string()),
+    })?;
+    let client_secret = env_non_empty("X_CLIENT_SECRET");
+
+    let refreshed = refresh_x_access_token(
+        &client_id,
+        client_secret.as_deref(),
+        &refresh_token,
+        config.connect_timeout,
+        config.request_timeout,
+    )
+    .await?;
+
+    Ok(json!({
+        "ok": true,
+        "platform": "x",
+        "mode": "auth_token_refresh",
+        "token_refreshed": true,
+        "access_token_expires_in": refreshed.expires_in,
+        "refresh_token_saved": refreshed.refresh_token.is_some(),
+        "scope": refreshed.scope,
+        "token_type": refreshed.token_type,
+        "next": {
+            "message": "Token refresh completed.",
+            "command": "outbox auth x token-status"
+        }
+    }))
+}
+
 async fn x_oauth_callback_handler(
     State(state): State<Arc<XOAuthCallbackState>>,
     Query(query): Query<XCallbackQuery>,
@@ -915,7 +1074,7 @@ async fn process_x_callback(
         });
     }
 
-    exchange_x_code_for_token(
+    let result = exchange_x_code_for_token(
         code,
         &state.client_id,
         state.client_secret.as_deref(),
@@ -924,7 +1083,9 @@ async fn process_x_callback(
         state.connect_timeout,
         state.request_timeout,
     )
-    .await
+    .await?;
+    clear_x_oauth_state_file();
+    Ok(result)
 }
 
 async fn exchange_x_code_for_token(
@@ -1012,6 +1173,84 @@ async fn exchange_x_code_for_token(
         scope: body.scope,
         token_type: body.token_type,
     })
+}
+
+async fn refresh_x_access_token(
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<XTokenExchangeResponse, AppError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to build HTTP client: {err}"),
+            status: None,
+            api_error: None,
+            retryable: false,
+        })?;
+
+    let mut params = vec![
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token.to_string()),
+        ("client_id", client_id.to_string()),
+    ];
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret.to_string()));
+    }
+
+    let response = client
+        .post("https://api.x.com/2/oauth2/token")
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("X token refresh request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let maybe_json = response.json::<Value>().await.ok();
+        return Err(AppError::Http {
+            message: format!("X token refresh returned {}", status.as_u16()),
+            status: Some(status.as_u16()),
+            api_error: maybe_json,
+            retryable: status.is_server_error() || status.as_u16() == 429,
+        });
+    }
+
+    let body = response
+        .json::<XTokenExchangeResponse>()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to parse X token refresh response: {err}"),
+            status: Some(200),
+            api_error: None,
+            retryable: false,
+        })?;
+
+    upsert_env_value("X_ACCESS_TOKEN", &body.access_token)?;
+    if let Some(refresh_token) = body.refresh_token.clone() {
+        upsert_env_value("X_REFRESH_TOKEN", &refresh_token)?;
+    }
+    if let Some(expires_in) = body.expires_in {
+        upsert_env_value("X_ACCESS_TOKEN_EXPIRES_IN", &expires_in.to_string())?;
+    }
+    if let Some(scope) = body.scope.clone() {
+        upsert_env_value("X_SCOPES", &scope)?;
+    }
+    if let Some(token_type) = body.token_type.clone() {
+        upsert_env_value("X_TOKEN_TYPE", &token_type)?;
+    }
+
+    Ok(body)
 }
 
 async fn start_linkedin_login(config: &RuntimeConfig) -> Result<Value, AppError> {
@@ -1930,96 +2169,158 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
             retryable: false,
         })?;
 
+    let mut active_access_token = auth.access_token.clone();
+    let mut token_refreshed = false;
     let mut media_ids: Vec<String> = Vec::new();
-    for path in &parsed.media_paths {
-        let media_id = x_upload_media_image(&client, &auth.access_token, path).await?;
-        media_ids.push(media_id);
-    }
 
-    let payload = if media_ids.is_empty() {
-        json!({ "text": text })
-    } else {
-        json!({
-            "text": text,
-            "media": {
-                "media_ids": media_ids
+    let (body, request_id, final_media_ids): (Option<Value>, Option<String>, Vec<String>) = loop {
+        media_ids.clear();
+        let mut upload_auth_failed = false;
+        for path in &parsed.media_paths {
+            let (media_id, upload_status, _upload_error) =
+                x_upload_media_image(&client, &active_access_token, path).await?;
+            if upload_status == Some(401) {
+                upload_auth_failed = true;
+                break;
             }
-        })
-    };
-
-    let response = client
-        .post("https://api.x.com/2/tweets")
-        .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
-        .header(CONTENT_TYPE, "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|err| AppError::Http {
-            message: format!("X request failed: {err}"),
-            status: None,
-            api_error: None,
-            retryable: err.is_timeout() || err.is_connect(),
-        })?;
-
-    let status = response.status();
-    let request_id = response
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
-
-    if !status.is_success() {
-        let mut maybe_json = response.json::<Value>().await.ok();
-        if status.as_u16() == 403 && is_generic_x_forbidden(maybe_json.as_ref()) {
-            if weighted_len > 280 {
-                let mut err = maybe_json.unwrap_or_else(|| json!({}));
-                if !err.is_object() {
-                    err = json!({ "provider_error": err });
-                }
-                if let Some(obj) = err.as_object_mut() {
-                    obj.insert(
-                        "local_hint".to_string(),
-                        json!("x_likely_over_length"),
-                    );
-                    obj.insert(
-                        "local_weighted_length".to_string(),
-                        json!(weighted_len),
-                    );
-                    obj.insert("local_weighted_limit".to_string(), json!(280));
-                }
-                maybe_json = Some(err);
-            } else if cashtag_count > 1 {
-                let mut err = maybe_json.unwrap_or_else(|| json!({}));
-                if !err.is_object() {
-                    err = json!({ "provider_error": err });
-                }
-                if let Some(obj) = err.as_object_mut() {
-                    obj.insert(
-                        "local_hint".to_string(),
-                        json!("x_likely_cashtag_limit"),
-                    );
-                    obj.insert("local_cashtag_count".to_string(), json!(cashtag_count));
-                    obj.insert("local_cashtag_limit".to_string(), json!(1));
-                }
-                maybe_json = Some(err);
-            }
+            media_ids.push(media_id);
         }
+
+        if upload_auth_failed {
+            if token_refreshed {
+                return Err(AppError::MissingAuth {
+                    message: "X access token is invalid or expired for media upload.".to_string(),
+                    suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
+                    command: Some("outbox auth x login".to_string()),
+                });
+            }
+            let refresh_token = auth.refresh_token.clone().ok_or(AppError::MissingAuth {
+                message: "X access token is invalid or expired for media upload.".to_string(),
+                suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
+                command: Some("outbox auth x login".to_string()),
+            })?;
+            let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
+                message: "X_CLIENT_ID is missing.".to_string(),
+                suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
+                command: Some("outbox auth x token-refresh".to_string()),
+            })?;
+            let client_secret = env_non_empty("X_CLIENT_SECRET");
+            let refreshed = refresh_x_access_token(
+                &client_id,
+                client_secret.as_deref(),
+                &refresh_token,
+                config.connect_timeout,
+                config.request_timeout,
+            )
+            .await?;
+            active_access_token = refreshed.access_token;
+            token_refreshed = true;
+            continue;
+        }
+
+        let payload = if media_ids.is_empty() {
+            json!({ "text": text })
+        } else {
+            json!({
+                "text": text,
+                "media": {
+                    "media_ids": media_ids
+                }
+            })
+        };
+
+        let response = client
+            .post("https://api.x.com/2/tweets")
+            .header(AUTHORIZATION, format!("Bearer {}", active_access_token))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| AppError::Http {
+                message: format!("X request failed: {err}"),
+                status: None,
+                api_error: None,
+                retryable: err.is_timeout() || err.is_connect(),
+            })?;
+
+        let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string());
+
         if status.as_u16() == 401 {
-            return Err(AppError::MissingAuth {
+            if token_refreshed {
+                return Err(AppError::MissingAuth {
+                    message: "X access token is invalid or expired.".to_string(),
+                    suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
+                    command: Some("outbox auth x login".to_string()),
+                });
+            }
+            let refresh_token = auth.refresh_token.clone().ok_or(AppError::MissingAuth {
                 message: "X access token is invalid or expired.".to_string(),
-                suggestion: Some("Update X_ACCESS_TOKEN in .env and retry publish.".to_string()),
-                command: Some("outbox publish x --file <path>".to_string()),
+                suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
+                command: Some("outbox auth x login".to_string()),
+            })?;
+            let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
+                message: "X_CLIENT_ID is missing.".to_string(),
+                suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
+                command: Some("outbox auth x token-refresh".to_string()),
+            })?;
+            let client_secret = env_non_empty("X_CLIENT_SECRET");
+            let refreshed = refresh_x_access_token(
+                &client_id,
+                client_secret.as_deref(),
+                &refresh_token,
+                config.connect_timeout,
+                config.request_timeout,
+            )
+            .await?;
+            active_access_token = refreshed.access_token;
+            token_refreshed = true;
+            continue;
+        }
+
+        if !status.is_success() {
+            let mut maybe_json = response.json::<Value>().await.ok();
+            if status.as_u16() == 403 && is_generic_x_forbidden(maybe_json.as_ref()) {
+                if weighted_len > 280 {
+                    let mut err = maybe_json.unwrap_or_else(|| json!({}));
+                    if !err.is_object() {
+                        err = json!({ "provider_error": err });
+                    }
+                    if let Some(obj) = err.as_object_mut() {
+                        obj.insert("local_hint".to_string(), json!("x_likely_over_length"));
+                        obj.insert("local_weighted_length".to_string(), json!(weighted_len));
+                        obj.insert("local_weighted_limit".to_string(), json!(280));
+                    }
+                    maybe_json = Some(err);
+                } else if cashtag_count > 1 {
+                    let mut err = maybe_json.unwrap_or_else(|| json!({}));
+                    if !err.is_object() {
+                        err = json!({ "provider_error": err });
+                    }
+                    if let Some(obj) = err.as_object_mut() {
+                        obj.insert("local_hint".to_string(), json!("x_likely_cashtag_limit"));
+                        obj.insert("local_cashtag_count".to_string(), json!(cashtag_count));
+                        obj.insert("local_cashtag_limit".to_string(), json!(1));
+                    }
+                    maybe_json = Some(err);
+                }
+            }
+            return Err(AppError::Http {
+                message: format!("X API returned {}", status.as_u16()),
+                status: Some(status.as_u16()),
+                api_error: maybe_json,
+                retryable: status.is_server_error() || status.as_u16() == 429,
             });
         }
-        return Err(AppError::Http {
-            message: format!("X API returned {}", status.as_u16()),
-            status: Some(status.as_u16()),
-            api_error: maybe_json,
-            retryable: status.is_server_error() || status.as_u16() == 429,
-        });
-    }
 
-    let body = response.json::<Value>().await.ok();
+        let body = response.json::<Value>().await.ok();
+        break (body, request_id, media_ids.clone());
+    };
+
     let post_id = body
         .as_ref()
         .and_then(|v| v.get("data"))
@@ -2050,16 +2351,12 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     );
     if let Some(obj) = value.as_object_mut() {
         obj.insert("signature_applied".to_string(), json!(signature_applied));
+        obj.insert("token_refreshed".to_string(), json!(token_refreshed));
         obj.insert("media_count".to_string(), json!(parsed.media_paths.len()));
         obj.insert("media_paths".to_string(), json!(
             parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
         ));
-        obj.insert("media_ids".to_string(), json!(payload
-            .get("media")
-            .and_then(|m| m.get("media_ids"))
-            .cloned()
-            .unwrap_or_else(|| json!([]))
-        ));
+        obj.insert("media_ids".to_string(), json!(final_media_ids));
     }
 
     let published_at = value
@@ -2303,7 +2600,11 @@ fn load_x_auth() -> Result<XAuth, AppError> {
         suggestion: Some("Set X_ACCESS_TOKEN in .env from your X app user authorization.".to_string()),
         command: Some("outbox publish x --file <path>".to_string()),
     })?;
-    Ok(XAuth { access_token })
+    let refresh_token = env_non_empty("X_REFRESH_TOKEN");
+    Ok(XAuth {
+        access_token,
+        refresh_token,
+    })
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -2871,7 +3172,7 @@ async fn x_upload_media_image(
     client: &reqwest::Client,
     access_token: &str,
     image_path: &PathBuf,
-) -> Result<String, AppError> {
+) -> Result<(String, Option<u16>, Option<Value>), AppError> {
     let image_bytes = fs::read(image_path).map_err(|err| AppError::Io {
         message: format!("Failed to read image '{}': {err}", image_path.display()),
     })?;
@@ -2898,11 +3199,7 @@ async fn x_upload_media_image(
 
     let status = response.status();
     if status.as_u16() == 401 {
-        return Err(AppError::MissingAuth {
-            message: "X access token is invalid or expired for media upload.".to_string(),
-            suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
-            command: Some("outbox auth x login".to_string()),
-        });
+        return Ok((String::new(), Some(401), response.json::<Value>().await.ok()));
     }
     if status.as_u16() == 403 {
         return Err(AppError::MissingAuth {
@@ -2955,7 +3252,7 @@ async fn x_upload_media_image(
             retryable: false,
         })?;
 
-    Ok(media_id)
+    Ok((media_id, None, None))
 }
 
 fn media_content_type(image_path: &PathBuf) -> Result<&'static str, AppError> {
@@ -3018,6 +3315,36 @@ fn save_oauth_state(state: &OAuthState) -> Result<(), AppError> {
     fs::write(OAUTH_STATE_PATH, raw).map_err(|err| AppError::Io {
         message: format!("Failed to write OAuth state file: {err}"),
     })
+}
+
+fn save_x_oauth_state(state: &XOAuthState) -> Result<(), AppError> {
+    fs::create_dir_all(".outbox").map_err(|err| AppError::Io {
+        message: format!("Failed to create .outbox directory: {err}"),
+    })?;
+    let raw = serde_json::to_string(state).map_err(|err| AppError::Io {
+        message: format!("Failed to encode X OAuth state: {err}"),
+    })?;
+    fs::write(X_OAUTH_STATE_PATH, raw).map_err(|err| AppError::Io {
+        message: format!("Failed to write X OAuth state file: {err}"),
+    })
+}
+
+fn load_x_oauth_state() -> Result<XOAuthState, AppError> {
+    let raw = fs::read_to_string(X_OAUTH_STATE_PATH).map_err(|_| AppError::Validation {
+        message: "X OAuth state file not found.".to_string(),
+        suggestion: Some(
+            "Run outbox auth x login first, or pass --code-verifier to auth x exchange."
+                .to_string(),
+        ),
+        command: Some("outbox auth x login".to_string()),
+    })?;
+    serde_json::from_str::<XOAuthState>(&raw).map_err(|err| AppError::Io {
+        message: format!("Failed to parse X OAuth state file: {err}"),
+    })
+}
+
+fn clear_x_oauth_state_file() {
+    let _ = fs::remove_file(X_OAUTH_STATE_PATH);
 }
 
 fn validate_oauth_state(input_state: &str) -> Result<(), AppError> {

@@ -209,6 +209,14 @@ Behavior:
 - exchanges code for token and saves `.env`
 - shows success/failure in both browser and terminal
 
+Manual fallback (if callback flow cannot complete):
+
+```bash
+cargo run -- auth x exchange --code <code> --state <state>
+```
+
+This command reuses saved PKCE verifier from the latest `auth x login`. You can also pass `--code-verifier` explicitly.
+
 ### 5) Publish
 
 ```bash
@@ -232,6 +240,13 @@ Expected success JSON:
   "request_id": "<x-request-id-or-null>",
   "published_at": "2026-08-15T12:34:56Z"
 }
+```
+
+X token helpers:
+
+```bash
+cargo run -- auth x token-status
+cargo run -- auth x token-refresh
 ```
 
 ## Auth Commands (Non-Interactive)
