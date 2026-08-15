@@ -4,3 +4,16 @@ pretty_json = true
 [timeouts]
 connect_seconds = 10
 request_seconds = 30
+
+
+[signature]
+enabled = true
+text = "\n[Sent from outbox, by shk]"
+
+[platform.linkedin.signature]
+enabled = false
+# text = "\n[Sent from outbox, by shk]"
+
+[platform.x.signature]
+enabled = true
+text = "\n\n[Sent from outbox, by Shamim.]"

@@ -1,6 +1,5 @@
 use std::env;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -27,7 +26,7 @@ const DEFAULT_LINKEDIN_VERSION: &str = "202601";
 const OAUTH_STATE_PATH: &str = ".outbox/linkedin_oauth_state";
 const PUBLISH_LOG_PATH: &str = ".outbox/publish-log.jsonl";
 const ENV_PATH: &str = ".env";
-const DEFAULT_X_SCOPES: &str = "tweet.write users.read offline.access";
+const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read offline.access";
 
 #[derive(Debug, Parser)]
 #[command(name = "outbox")]
@@ -65,6 +64,10 @@ struct PublishLinkedinArgs {
     allow_duplicate: bool,
     #[arg(long, default_value_t = false)]
     debug_payload: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "no_signature")]
+    add_signature: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "add_signature")]
+    no_signature: bool,
 }
 
 #[derive(Debug, Args)]
@@ -73,6 +76,18 @@ struct PublishXArgs {
     file: PathBuf,
     #[arg(long)]
     timeout_seconds: Option<u64>,
+    #[arg(long, default_value_t = false)]
+    allow_duplicate: bool,
+    #[arg(long, default_value_t = false)]
+    allow_cashtag: bool,
+    #[arg(long, default_value_t = false)]
+    allow_length: bool,
+    #[arg(long, default_value_t = false)]
+    force: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "no_signature")]
+    add_signature: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "add_signature")]
+    no_signature: bool,
 }
 
 #[derive(Debug, Args)]
@@ -96,7 +111,7 @@ struct AuthLinkedinArgs {
 #[derive(Debug, Subcommand)]
 enum AuthLinkedinCommand {
     Guide,
-    Login(AuthLinkedinLoginArgs),
+    Login,
     Exchange(AuthLinkedinExchangeArgs),
     Whoami,
     TokenStatus,
@@ -115,12 +130,6 @@ enum AuthXCommand {
 }
 
 #[derive(Debug, Args)]
-struct AuthLinkedinLoginArgs {
-    #[arg(long, default_value_t = false)]
-    open_browser: bool,
-}
-
-#[derive(Debug, Args)]
 struct AuthLinkedinExchangeArgs {
     #[arg(long)]
     code: String,
@@ -132,6 +141,8 @@ struct AuthLinkedinExchangeArgs {
 struct FileConfig {
     output: Option<OutputConfig>,
     timeouts: Option<TimeoutConfig>,
+    signature: Option<SignatureConfigFile>,
+    platform: Option<PlatformConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,11 +156,37 @@ struct TimeoutConfig {
     request_seconds: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct SignatureConfigFile {
+    enabled: Option<bool>,
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlatformConfig {
+    linkedin: Option<PlatformEntryConfig>,
+    x: Option<PlatformEntryConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlatformEntryConfig {
+    signature: Option<SignatureConfigFile>,
+}
+
+#[derive(Debug, Clone)]
+struct SignatureLayer {
+    enabled: Option<bool>,
+    text: Option<String>,
+}
+
 #[derive(Debug)]
 struct RuntimeConfig {
     pretty_json: bool,
     connect_timeout: Duration,
     request_timeout: Duration,
+    global_signature: SignatureLayer,
+    linkedin_signature: SignatureLayer,
+    x_signature: SignatureLayer,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,12 +236,28 @@ struct XCallbackQuery {
     error_description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LinkedinCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
 #[derive(Debug)]
 struct XAuthResult {
     access_token_expires_in: Option<u64>,
     refresh_token_saved: bool,
     scope: Option<String>,
     token_type: Option<String>,
+}
+
+#[derive(Debug)]
+struct LinkedinAuthResult {
+    access_token_expires_in: Option<u64>,
+    refresh_token_saved: bool,
+    author_urn: String,
+    profile_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -329,7 +382,7 @@ impl AppError {
                 http_status: *status,
                 api_error: api_error.clone(),
                 retryable: *retryable,
-                suggestion: Some("Inspect api_error for provider details and retry when resolved.".to_string()),
+                suggestion: Some(http_error_suggestion(*status, api_error.as_ref())),
                 command: None,
             },
             AppError::DuplicatePublish {
@@ -357,6 +410,78 @@ impl AppError {
     }
 }
 
+fn http_error_suggestion(status: Option<u16>, api_error: Option<&Value>) -> String {
+    if let Some(err) = api_error {
+        if let Some(hint) = err.get("local_hint").and_then(|v| v.as_str()) {
+            if hint == "x_likely_over_length" {
+                let weighted = err
+                    .get("local_weighted_length")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                return format!(
+                    "X API returned generic forbidden, but local check indicates over length (weighted {} > 280). Shorten text and retry.",
+                    weighted
+                );
+            }
+            if hint == "x_likely_cashtag_limit" {
+                let count = err
+                    .get("local_cashtag_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                return format!(
+                    "X API returned generic forbidden, but local check indicates cashtag limit ({} found; API self-serve allows max 1). Reduce cashtags and retry.",
+                    count
+                );
+            }
+        }
+    }
+
+    if let Some(402) = status {
+        if let Some(err) = api_error {
+            let typ = err.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+            let detail = err
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if typ.contains("credits-depleted") || detail.contains("credits depleted") {
+                return "X API credits are depleted for this app/project. Enable billing or upgrade access in X Developer Portal, then retry publish.".to_string();
+            }
+        }
+    }
+
+    if let Some(403) = status {
+        if let Some(err) = api_error {
+            let detail_raw = err
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let detail = detail_raw.to_ascii_lowercase();
+            let typ = err.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+
+            if detail.contains("maximum of one cashtag")
+                || detail.contains("remove additional cashtags")
+            {
+                return "X API rejected the post due to cashtag limit (max 1 cashtag in API self-serve mode). Reduce cashtags to one and retry.".to_string();
+            }
+
+            if detail.contains("too long")
+                || detail.contains("over 280")
+                || detail.contains("280")
+            {
+                return "X API rejected post length. Shorten text to fit API weighted 280-character rules, then retry.".to_string();
+            }
+
+            if typ.contains("not-authorized-for-resource") {
+                return "Request is not authorized for this API resource. Verify app/project access level and OAuth scopes for this endpoint.".to_string();
+            }
+        }
+        return "Request is forbidden by provider policy/settings. Verify app permissions, user scopes, and product access for this endpoint.".to_string();
+    }
+
+    "Inspect api_error for provider details and retry when resolved.".to_string()
+}
+
 #[derive(Debug)]
 struct LinkedinAuth {
     access_token: String,
@@ -382,6 +507,17 @@ struct XOAuthCallbackState {
     result_tx: Arc<Mutex<Option<oneshot::Sender<Result<XAuthResult, AppError>>>>>,
 }
 
+#[derive(Clone)]
+struct LinkedinOAuthCallbackState {
+    expected_state: String,
+    client_id: String,
+    client_secret: String,
+    redirect_uri: String,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    result_tx: Arc<Mutex<Option<oneshot::Sender<Result<LinkedinAuthResult, AppError>>>>>,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let _ = dotenvy::from_filename_override(".env");
@@ -396,7 +532,7 @@ async fn main() -> ExitCode {
         Commands::Auth(auth) => match auth.platform {
             AuthPlatform::Linkedin(args) => match args.command {
                 AuthLinkedinCommand::Guide => show_linkedin_auth_guide(),
-                AuthLinkedinCommand::Login(args) => start_linkedin_login(args),
+                AuthLinkedinCommand::Login => start_linkedin_login(&config).await,
                 AuthLinkedinCommand::Exchange(args) => exchange_linkedin_code(args, &config).await,
                 AuthLinkedinCommand::Whoami => resolve_linkedin_author_urn(&config).await,
                 AuthLinkedinCommand::TokenStatus => show_linkedin_token_status(),
@@ -425,6 +561,18 @@ fn load_config() -> RuntimeConfig {
         pretty_json: false,
         connect_timeout: Duration::from_secs(10),
         request_timeout: Duration::from_secs(30),
+        global_signature: SignatureLayer {
+            enabled: None,
+            text: None,
+        },
+        linkedin_signature: SignatureLayer {
+            enabled: None,
+            text: None,
+        },
+        x_signature: SignatureLayer {
+            enabled: None,
+            text: None,
+        },
     };
 
     let Ok(raw) = fs::read_to_string("config.toml") else {
@@ -454,10 +602,36 @@ fn load_config() -> RuntimeConfig {
         .map(Duration::from_secs)
         .unwrap_or(defaults.request_timeout);
 
+    let global_signature = to_signature_layer(file_config.signature.as_ref());
+    let linkedin_signature = to_signature_layer(
+        file_config
+            .platform
+            .as_ref()
+            .and_then(|p| p.linkedin.as_ref())
+            .and_then(|p| p.signature.as_ref()),
+    );
+    let x_signature = to_signature_layer(
+        file_config
+            .platform
+            .as_ref()
+            .and_then(|p| p.x.as_ref())
+            .and_then(|p| p.signature.as_ref()),
+    );
+
     RuntimeConfig {
         pretty_json,
         connect_timeout,
         request_timeout,
+        global_signature,
+        linkedin_signature,
+        x_signature,
+    }
+}
+
+fn to_signature_layer(cfg: Option<&SignatureConfigFile>) -> SignatureLayer {
+    SignatureLayer {
+        enabled: cfg.and_then(|c| c.enabled),
+        text: cfg.and_then(|c| c.text.clone()),
     }
 }
 
@@ -514,7 +688,8 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
         suggestion: Some("Set X_REDIRECT_URI in .env and match it in your X app callback URL settings.".to_string()),
         command: Some("outbox auth x login".to_string()),
     })?;
-    let scopes = env_non_empty("X_SCOPES").unwrap_or_else(|| DEFAULT_X_SCOPES.to_string());
+    let configured_scopes = env_non_empty("X_SCOPES").unwrap_or_else(|| DEFAULT_X_SCOPES.to_string());
+    let scopes = ensure_x_required_scopes(&configured_scopes);
     let client_secret = env_non_empty("X_CLIENT_SECRET");
 
     let redirect = Url::parse(&redirect_uri).map_err(|err| AppError::Validation {
@@ -543,13 +718,7 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
         encode(&code_challenge)
     );
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|err| AppError::Validation {
-            message: format!("Invalid callback host/port from X_REDIRECT_URI: {err}"),
-            suggestion: Some("Use a valid localhost callback URL.".to_string()),
-            command: Some("outbox auth x login".to_string()),
-        })?;
+    let bind_target = format!("{host}:{port}");
 
     let (result_tx, result_rx) = oneshot::channel::<Result<XAuthResult, AppError>>();
     let state_obj = XOAuthCallbackState {
@@ -563,20 +732,20 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
         result_tx: Arc::new(Mutex::new(Some(result_tx))),
     };
 
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = tokio::net::TcpListener::bind(bind_target.as_str())
         .await
         .map_err(|err| AppError::Io {
-            message: format!("Failed to bind local callback server on {addr}: {err}"),
+            message: format!("Failed to bind local callback server on {bind_target}: {err}"),
         })?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let app = Router::new()
         .route("/", get(x_oauth_callback_handler))
-        .route("/*rest", get(x_oauth_callback_handler))
+        .route("/{*rest}", get(x_oauth_callback_handler))
         .with_state(Arc::new(state_obj.clone()));
 
     let expected_path = if path.is_empty() { "/".to_string() } else { path };
-    println!("X auth: local callback server listening on http://{addr}{expected_path}");
+    println!("X auth: local callback server listening on http://{bind_target}{expected_path}");
     println!("X auth: opening browser for authorization...");
     println!("X auth: if browser does not open, use this URL:\n{auth_url}");
     println!("X auth: waiting for callback (Ctrl-C to cancel)...");
@@ -632,13 +801,20 @@ async fn x_oauth_callback_handler(
 ) -> Html<String> {
     let result = process_x_callback(state.clone(), query).await;
 
-    let (title, message): (&str, String) = match &result {
+    let (title, message, icon, accent): (&str, String, &str, &str) = match &result {
         Ok(_) => (
-            "X authorization successful",
+            "X Authorization Successful",
             "Access token saved successfully. You can close this tab and return to the terminal."
                 .to_string(),
+            "✅",
+            "#138a36",
         ),
-        Err(err) => ("X authorization failed", err.to_output().message),
+        Err(err) => (
+            "X Authorization Failed",
+            err.to_output().message,
+            "😥",
+            "#c62828",
+        ),
     };
 
     if let Some(tx) = state.result_tx.lock().await.take() {
@@ -646,7 +822,7 @@ async fn x_oauth_callback_handler(
     }
 
     Html(format!(
-        "<html><head><meta charset=\"utf-8\"><title>{title}</title></head><body><h2>{title}</h2><p>{message}</p></body></html>"
+        "<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>{title}</title><style>body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif;background:#f4f6f8;color:#1f2937;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;}} .card{{max-width:560px;width:100%;background:white;border:1px solid #e5e7eb;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.08);padding:28px 24px;text-align:center;}} .icon{{font-size:34px;line-height:1;margin-bottom:8px;}} h2{{margin:0 0 8px;font-size:22px;font-weight:700;color:{accent};}} p{{margin:0;color:#4b5563;font-size:15px;line-height:1.6;}}</style></head><body><div class=\"card\"><div class=\"icon\">{icon}</div><h2>{title}</h2><p>{message}</p></div></body></html>"
     ))
 }
 
@@ -772,7 +948,7 @@ async fn exchange_x_code_for_token(
         upsert_env_value("X_ACCESS_TOKEN_EXPIRES_IN", &expires_in.to_string())?;
     }
     if let Some(scope) = body.scope.clone() {
-        upsert_env_value("X_SCOPE", &scope)?;
+        upsert_env_value("X_SCOPES", &scope)?;
     }
     if let Some(token_type) = body.token_type.clone() {
         upsert_env_value("X_TOKEN_TYPE", &token_type)?;
@@ -786,7 +962,7 @@ async fn exchange_x_code_for_token(
     })
 }
 
-fn start_linkedin_login(args: AuthLinkedinLoginArgs) -> Result<Value, AppError> {
+async fn start_linkedin_login(config: &RuntimeConfig) -> Result<Value, AppError> {
     let client_id = env::var("LINKEDIN_CLIENT_ID").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_CLIENT_ID is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_CLIENT_ID in .env from your LinkedIn app settings.".to_string()),
@@ -798,6 +974,24 @@ fn start_linkedin_login(args: AuthLinkedinLoginArgs) -> Result<Value, AppError> 
         command: Some("outbox auth linkedin guide".to_string()),
     })?;
     let scopes = env::var("LINKEDIN_SCOPES").unwrap_or_else(|_| "w_member_social".to_string());
+    let client_secret = env::var("LINKEDIN_CLIENT_SECRET").map_err(|_| AppError::MissingAuth {
+        message: "LINKEDIN_CLIENT_SECRET is missing.".to_string(),
+        suggestion: Some("Set LINKEDIN_CLIENT_SECRET in .env from your LinkedIn app settings.".to_string()),
+        command: Some("outbox auth linkedin guide".to_string()),
+    })?;
+
+    let redirect = Url::parse(&redirect_uri).map_err(|err| AppError::Validation {
+        message: format!("Invalid LINKEDIN_REDIRECT_URI: {err}"),
+        suggestion: Some("Use a full URL like http://localhost:8788/callback".to_string()),
+        command: Some("outbox auth linkedin login".to_string()),
+    })?;
+    let host = redirect.host_str().ok_or(AppError::Validation {
+        message: "LINKEDIN_REDIRECT_URI must include a host.".to_string(),
+        suggestion: Some("Use localhost or 127.0.0.1 callback URL.".to_string()),
+        command: Some("outbox auth linkedin login".to_string()),
+    })?;
+    let port = redirect.port().unwrap_or(80);
+    let path = redirect.path().to_string();
 
     let state = generate_state(32);
     let auth_url = format!(
@@ -813,22 +1007,190 @@ fn start_linkedin_login(args: AuthLinkedinLoginArgs) -> Result<Value, AppError> 
         created_at: Utc::now().to_rfc3339(),
     })?;
 
-    let browser_opened = if args.open_browser {
-        webbrowser::open(&auth_url).ok().map(|_| true)
-    } else {
-        None
+    let bind_target = format!("{host}:{port}");
+
+    let (result_tx, result_rx) = oneshot::channel::<Result<LinkedinAuthResult, AppError>>();
+    let state_obj = LinkedinOAuthCallbackState {
+        expected_state: state,
+        client_id,
+        client_secret,
+        redirect_uri,
+        connect_timeout: config.connect_timeout,
+        request_timeout: config.request_timeout,
+        result_tx: Arc::new(Mutex::new(Some(result_tx))),
     };
 
-    Ok(json!({
-        "ok": true,
-        "platform": "linkedin",
-        "mode": "auth_login",
-        "auth_url": auth_url,
-        "state": state,
-        "browser_opened": browser_opened,
-        "next_command": "outbox auth linkedin exchange --code <code-from-redirect-url> --state <state-from-login>",
-        "note": "Open auth_url in a browser, approve access, then copy the code query parameter from redirect URL."
-    }))
+    let listener = tokio::net::TcpListener::bind(bind_target.as_str())
+        .await
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to bind local callback server on {bind_target}: {err}"),
+        })?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let app = Router::new()
+        .route("/", get(linkedin_oauth_callback_handler))
+        .route("/{*rest}", get(linkedin_oauth_callback_handler))
+        .with_state(Arc::new(state_obj.clone()));
+
+    let expected_path = if path.is_empty() { "/".to_string() } else { path };
+    println!("LinkedIn auth: local callback server listening on http://{bind_target}{expected_path}");
+    println!("LinkedIn auth: opening browser for authorization...");
+    println!("LinkedIn auth: if browser does not open, use this URL:\n{auth_url}");
+    println!("LinkedIn auth: waiting for callback (Ctrl-C to cancel)...");
+
+    let server_task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+
+    let browser_opened = webbrowser::open(&auth_url).ok().map(|_| true);
+
+    let result = match tokio::time::timeout(Duration::from_secs(300), result_rx).await {
+        Ok(Ok(inner)) => inner,
+        Ok(Err(_)) => Err(AppError::Io {
+            message: "Auth callback channel closed unexpectedly.".to_string(),
+        }),
+        Err(_) => Err(AppError::Validation {
+            message: "Timed out waiting for LinkedIn OAuth callback.".to_string(),
+            suggestion: Some("Retry auth and complete browser consent within 5 minutes.".to_string()),
+            command: Some("outbox auth linkedin login".to_string()),
+        }),
+    };
+
+    let _ = shutdown_tx.send(());
+    let _ = server_task.await;
+
+    match result {
+        Ok(auth_result) => Ok(json!({
+            "ok": true,
+            "platform": "linkedin",
+            "mode": "auth_linkedin_login",
+            "browser_opened": browser_opened,
+            "access_token_saved": true,
+            "refresh_token_saved": auth_result.refresh_token_saved,
+            "access_token_expires_in": auth_result.access_token_expires_in,
+            "author_urn": auth_result.author_urn,
+            "author_urn_saved_to_env": true,
+            "name": auth_result.profile_name,
+            "next": {
+                "message": "LinkedIn auth completed. You can publish now.",
+                "command": "outbox publish linkedin --file <path>"
+            }
+        })),
+        Err(err) => Err(err),
+    }
+}
+
+async fn linkedin_oauth_callback_handler(
+    State(state): State<Arc<LinkedinOAuthCallbackState>>,
+    Query(query): Query<LinkedinCallbackQuery>,
+) -> Html<String> {
+    let result = process_linkedin_callback(state.clone(), query).await;
+
+    let (title, message, icon, accent): (&str, String, &str, &str) = match &result {
+        Ok(_) => (
+            "LinkedIn Authorization Successful",
+            "Access token and author URN saved successfully. You can close this tab and return to the terminal.".to_string(),
+            "✅",
+            "#138a36",
+        ),
+        Err(err) => (
+            "LinkedIn Authorization Failed",
+            err.to_output().message,
+            "😥",
+            "#c62828",
+        ),
+    };
+
+    if let Some(tx) = state.result_tx.lock().await.take() {
+        let _ = tx.send(result);
+    }
+
+    Html(format!(
+        "<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>{title}</title><style>body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif;background:#f4f6f8;color:#1f2937;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;}} .card{{max-width:560px;width:100%;background:white;border:1px solid #e5e7eb;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.08);padding:28px 24px;text-align:center;}} .icon{{font-size:34px;line-height:1;margin-bottom:8px;}} h2{{margin:0 0 8px;font-size:22px;font-weight:700;color:{accent};}} p{{margin:0;color:#4b5563;font-size:15px;line-height:1.6;}}</style></head><body><div class=\"card\"><div class=\"icon\">{icon}</div><h2>{title}</h2><p>{message}</p></div></body></html>"
+    ))
+}
+
+async fn process_linkedin_callback(
+    state: Arc<LinkedinOAuthCallbackState>,
+    query: LinkedinCallbackQuery,
+) -> Result<LinkedinAuthResult, AppError> {
+    if let Some(error) = query.error {
+        return Err(AppError::Validation {
+            message: format!(
+                "LinkedIn OAuth returned error: {}{}",
+                error,
+                query
+                    .error_description
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
+            ),
+            suggestion: Some("Retry consent flow and ensure scopes are approved in LinkedIn app settings.".to_string()),
+            command: Some("outbox auth linkedin login".to_string()),
+        });
+    }
+
+    let code = query.code.ok_or(AppError::Validation {
+        message: "LinkedIn callback did not include authorization code.".to_string(),
+        suggestion: Some("Retry auth flow and complete consent.".to_string()),
+        command: Some("outbox auth linkedin login".to_string()),
+    })?;
+    let returned_state = query.state.ok_or(AppError::Validation {
+        message: "LinkedIn callback did not include state.".to_string(),
+        suggestion: Some("Retry auth flow.".to_string()),
+        command: Some("outbox auth linkedin login".to_string()),
+    })?;
+    if returned_state != state.expected_state {
+        return Err(AppError::Validation {
+            message: "LinkedIn OAuth state mismatch.".to_string(),
+            suggestion: Some("Retry auth flow; ensure you use the latest auth URL.".to_string()),
+            command: Some("outbox auth linkedin login".to_string()),
+        });
+    }
+
+    let token = exchange_linkedin_code_for_token(
+        code,
+        &state.client_id,
+        &state.client_secret,
+        &state.redirect_uri,
+        state.connect_timeout,
+        state.request_timeout,
+    )
+    .await?;
+
+    upsert_env_value("LINKEDIN_ACCESS_TOKEN", &token.access_token)?;
+    if let Some(refresh_token) = token.refresh_token.clone() {
+        upsert_env_value("LINKEDIN_REFRESH_TOKEN", &refresh_token)?;
+    }
+    if let Some(expires_in) = token.expires_in {
+        upsert_env_value("LINKEDIN_ACCESS_TOKEN_EXPIRES_IN", &expires_in.to_string())?;
+    }
+    if let Some(refresh_expires_in) = token.refresh_token_expires_in {
+        upsert_env_value(
+            "LINKEDIN_REFRESH_TOKEN_EXPIRES_IN",
+            &refresh_expires_in.to_string(),
+        )?;
+    }
+
+    let userinfo = fetch_linkedin_userinfo(
+        &token.access_token,
+        state.connect_timeout,
+        state.request_timeout,
+    )
+    .await?;
+    let author_urn = format!("urn:li:person:{}", userinfo.sub);
+    upsert_env_value("LINKEDIN_AUTHOR_URN", &author_urn)?;
+    clear_oauth_state_file();
+
+    Ok(LinkedinAuthResult {
+        access_token_expires_in: token.expires_in,
+        refresh_token_saved: token.refresh_token.is_some(),
+        author_urn,
+        profile_name: userinfo.name,
+    })
 }
 
 async fn exchange_linkedin_code(
@@ -853,57 +1215,15 @@ async fn exchange_linkedin_code(
 
     validate_oauth_state(&args.state)?;
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(config.connect_timeout)
-        .timeout(config.request_timeout)
-        .build()
-        .map_err(|err| AppError::Http {
-            message: format!("Failed to build HTTP client: {err}"),
-            status: None,
-            api_error: None,
-            retryable: false,
-        })?;
-
-    let params = [
-        ("grant_type", "authorization_code".to_string()),
-        ("code", args.code.clone()),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
-        ("client_secret", client_secret),
-    ];
-
-    let response = client
-        .post("https://www.linkedin.com/oauth/v2/accessToken")
-        .form(&params)
-        .send()
-        .await
-        .map_err(|err| AppError::Http {
-            message: format!("LinkedIn token exchange request failed: {err}"),
-            status: None,
-            api_error: None,
-            retryable: err.is_timeout() || err.is_connect(),
-        })?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let maybe_json = response.json::<Value>().await.ok();
-        return Err(AppError::Http {
-            message: format!("LinkedIn token exchange returned {}", status.as_u16()),
-            status: Some(status.as_u16()),
-            api_error: maybe_json,
-            retryable: status.is_server_error() || status.as_u16() == 429,
-        });
-    }
-
-    let body = response
-        .json::<TokenExchangeResponse>()
-        .await
-        .map_err(|err| AppError::Http {
-            message: format!("Failed to parse token exchange response: {err}"),
-            status: Some(200),
-            api_error: None,
-            retryable: false,
-        })?;
+    let body = exchange_linkedin_code_for_token(
+        args.code,
+        &client_id,
+        &client_secret,
+        &redirect_uri,
+        config.connect_timeout,
+        config.request_timeout,
+    )
+    .await?;
 
     upsert_env_value("LINKEDIN_ACCESS_TOKEN", &body.access_token)?;
     if let Some(refresh_token) = body.refresh_token.clone() {
@@ -944,9 +1264,38 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
         command: Some("outbox auth linkedin guide".to_string()),
     })?;
 
+    let userinfo = fetch_linkedin_userinfo(
+        &access_token,
+        config.connect_timeout,
+        config.request_timeout,
+    )
+    .await?;
+
+    let author_urn = format!("urn:li:person:{}", userinfo.sub);
+    upsert_env_value("LINKEDIN_AUTHOR_URN", &author_urn)?;
+
+    Ok(json!({
+        "ok": true,
+        "platform": "linkedin",
+        "mode": "auth_whoami",
+        "name": userinfo.name,
+        "author_urn": author_urn,
+        "author_urn_saved_to_env": true,
+        "next": {
+            "message": "Author URN is ready. You can publish now.",
+            "command": "outbox publish linkedin --file <path>"
+        }
+    }))
+}
+
+async fn fetch_linkedin_userinfo(
+    access_token: &str,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<UserInfoResponse, AppError> {
     let client = reqwest::Client::builder()
-        .connect_timeout(config.connect_timeout)
-        .timeout(config.request_timeout)
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
         .build()
         .map_err(|err| AppError::Http {
             message: format!("Failed to build HTTP client: {err}"),
@@ -957,7 +1306,7 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
 
     let response = client
         .get("https://api.linkedin.com/v2/userinfo")
-        .header(AUTHORIZATION, format!("Bearer {access_token}"))
+        .header(AUTHORIZATION, format!("Bearer {}", access_token))
         .send()
         .await
         .map_err(|err| AppError::Http {
@@ -978,7 +1327,7 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
         });
     }
 
-    let userinfo = response
+    response
         .json::<UserInfoResponse>()
         .await
         .map_err(|err| AppError::Http {
@@ -986,23 +1335,68 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
             status: Some(200),
             api_error: None,
             retryable: false,
+        })
+}
+
+async fn exchange_linkedin_code_for_token(
+    code: String,
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<TokenExchangeResponse, AppError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to build HTTP client: {err}"),
+            status: None,
+            api_error: None,
+            retryable: false,
         })?;
 
-    let author_urn = format!("urn:li:person:{}", userinfo.sub);
-    upsert_env_value("LINKEDIN_AUTHOR_URN", &author_urn)?;
+    let params = [
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("client_id", client_id.to_string()),
+        ("client_secret", client_secret.to_string()),
+    ];
 
-    Ok(json!({
-        "ok": true,
-        "platform": "linkedin",
-        "mode": "auth_whoami",
-        "name": userinfo.name,
-        "author_urn": author_urn,
-        "author_urn_saved_to_env": true,
-        "next": {
-            "message": "Author URN is ready. You can publish now.",
-            "command": "outbox publish linkedin --file <path>"
-        }
-    }))
+    let response = client
+        .post("https://www.linkedin.com/oauth/v2/accessToken")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("LinkedIn token exchange request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let maybe_json = response.json::<Value>().await.ok();
+        return Err(AppError::Http {
+            message: format!("LinkedIn token exchange returned {}", status.as_u16()),
+            status: Some(status.as_u16()),
+            api_error: maybe_json,
+            retryable: status.is_server_error() || status.as_u16() == 429,
+        });
+    }
+
+    response
+        .json::<TokenExchangeResponse>()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to parse token exchange response: {err}"),
+            status: Some(200),
+            api_error: None,
+            retryable: false,
+        })
 }
 
 fn show_linkedin_token_status() -> Result<Value, AppError> {
@@ -1063,13 +1457,21 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         message: format!("Failed to read content file: {err}"),
     })?;
 
-    let commentary_raw = content.trim().to_string();
+    let mut commentary_raw = content.trim().to_string();
     if commentary_raw.is_empty() {
         return Err(AppError::Validation {
             message: "Content file is empty after trimming whitespace.".to_string(),
             suggestion: Some("Add post text to the file.".to_string()),
             command: None,
         });
+    }
+    let signature_override = signature_cli_override(args.add_signature, args.no_signature);
+    let mut signature_applied = false;
+    if let Some(signature) =
+        resolve_signature_text(config, PublishPlatformKind::Linkedin, signature_override)?
+    {
+        commentary_raw.push_str(&signature);
+        signature_applied = true;
     }
     let commentary = escape_little_text_plain(&commentary_raw);
 
@@ -1102,17 +1504,13 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         }));
     }
 
-    if !args.allow_duplicate {
-        if let Some(existing) = find_existing_publish("linkedin", &auth.author_urn, &fingerprint)? {
-            return Err(AppError::DuplicatePublish {
-                message: "Duplicate publish blocked for same platform/author/content.".to_string(),
-                existing_post_id: existing.post_id,
-                existing_post_url: existing.post_url,
-                content_sha256,
-                existing_published_at: existing.published_at,
-            });
-        }
-    }
+    maybe_block_duplicate(
+        "linkedin",
+        &auth.author_urn,
+        &fingerprint,
+        &content_sha256,
+        args.allow_duplicate,
+    )?;
 
     let request_timeout = args
         .timeout_seconds
@@ -1245,10 +1643,9 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
 
     if let Some(obj) = value.as_object_mut() {
         obj.insert("token_refreshed".to_string(), json!(token_refreshed));
-        obj.insert("duplicate_guard".to_string(), json!("checked"));
-        obj.insert("fingerprint".to_string(), json!(fingerprint.clone()));
-        obj.insert("content_sha256".to_string(), json!(content_sha256.clone()));
+        obj.insert("signature_applied".to_string(), json!(signature_applied));
     }
+    attach_publish_metadata(&mut value, &fingerprint, &content_sha256, true);
 
     let log_entry = PublishLogEntry {
         platform: "linkedin".to_string(),
@@ -1278,7 +1675,7 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     let content = fs::read_to_string(&args.file).map_err(|err| AppError::Io {
         message: format!("Failed to read content file: {err}"),
     })?;
-    let text = content.trim().to_string();
+    let mut text = content.trim().to_string();
     if text.is_empty() {
         return Err(AppError::Validation {
             message: "Content file is empty after trimming whitespace.".to_string(),
@@ -1286,8 +1683,28 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
             command: None,
         });
     }
+    let signature_override = signature_cli_override(args.add_signature, args.no_signature);
+    let mut signature_applied = false;
+    if let Some(signature) =
+        resolve_signature_text(config, PublishPlatformKind::X, signature_override)?
+    {
+        text.push_str(&signature);
+        signature_applied = true;
+    }
+    let bypass_duplicate = args.force || args.allow_duplicate;
+    let bypass_cashtag = args.force || args.allow_cashtag;
+    let bypass_length = args.force || args.allow_length;
+    let cashtag_count = extract_cashtags(&text).len();
+    let weighted_len = x_weighted_length(&text);
+
+    validate_x_post_text(&text, bypass_cashtag, bypass_length)?;
 
     let auth = load_x_auth()?;
+    let author_key = x_author_key();
+    let content_sha256 = compute_content_sha256(content.as_bytes());
+    let fingerprint = compute_fingerprint("x", &author_key, &text);
+    maybe_block_duplicate("x", &author_key, &fingerprint, &content_sha256, bypass_duplicate)?;
+
     let request_timeout = args
         .timeout_seconds
         .map(Duration::from_secs)
@@ -1326,7 +1743,41 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
         .map(|v| v.to_string());
 
     if !status.is_success() {
-        let maybe_json = response.json::<Value>().await.ok();
+        let mut maybe_json = response.json::<Value>().await.ok();
+        if status.as_u16() == 403 && is_generic_x_forbidden(maybe_json.as_ref()) {
+            if weighted_len > 280 {
+                let mut err = maybe_json.unwrap_or_else(|| json!({}));
+                if !err.is_object() {
+                    err = json!({ "provider_error": err });
+                }
+                if let Some(obj) = err.as_object_mut() {
+                    obj.insert(
+                        "local_hint".to_string(),
+                        json!("x_likely_over_length"),
+                    );
+                    obj.insert(
+                        "local_weighted_length".to_string(),
+                        json!(weighted_len),
+                    );
+                    obj.insert("local_weighted_limit".to_string(), json!(280));
+                }
+                maybe_json = Some(err);
+            } else if cashtag_count > 1 {
+                let mut err = maybe_json.unwrap_or_else(|| json!({}));
+                if !err.is_object() {
+                    err = json!({ "provider_error": err });
+                }
+                if let Some(obj) = err.as_object_mut() {
+                    obj.insert(
+                        "local_hint".to_string(),
+                        json!("x_likely_cashtag_limit"),
+                    );
+                    obj.insert("local_cashtag_count".to_string(), json!(cashtag_count));
+                    obj.insert("local_cashtag_limit".to_string(), json!(1));
+                }
+                maybe_json = Some(err);
+            }
+        }
         if status.as_u16() == 401 {
             return Err(AppError::MissingAuth {
                 message: "X access token is invalid or expired.".to_string(),
@@ -1356,14 +1807,222 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     let output = SuccessOutput {
         ok: true,
         platform: "x",
+        post_id: post_id.clone(),
+        post_url: post_url.clone(),
+        request_id: request_id.clone(),
+        published_at: Utc::now().to_rfc3339(),
+    };
+    let mut value = serde_json::to_value(output).map_err(|err| AppError::Io {
+        message: format!("Failed to serialize success output: {err}"),
+    })?;
+    attach_publish_metadata(&mut value, &fingerprint, &content_sha256, !bypass_duplicate);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("signature_applied".to_string(), json!(signature_applied));
+    }
+
+    let published_at = value
+        .get("published_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let log_entry = PublishLogEntry {
+        platform: "x".to_string(),
+        author_urn: author_key,
+        file_path: args.file.display().to_string(),
+        fingerprint,
+        content_sha256,
         post_id,
         post_url,
         request_id,
-        published_at: Utc::now().to_rfc3339(),
+        published_at,
     };
-    serde_json::to_value(output).map_err(|err| AppError::Io {
-        message: format!("Failed to serialize success output: {err}"),
-    })
+    append_publish_log(&log_entry)?;
+
+    Ok(value)
+}
+
+fn validate_x_post_text(
+    text: &str,
+    allow_cashtag: bool,
+    allow_length: bool,
+) -> Result<(), AppError> {
+    let cashtags = extract_cashtags(text);
+    if !allow_cashtag && cashtags.len() > 1 {
+        return Err(AppError::Validation {
+            message: format!(
+                "X self-serve posting allows max 1 cashtag per post; found {}.",
+                cashtags.len()
+            ),
+            suggestion: Some(
+                "Keep at most one cashtag (for example: $AAPL), or use --allow-cashtag to bypass local check."
+                    .to_string(),
+            ),
+            command: Some("outbox publish x --file <path>".to_string()),
+        });
+    }
+
+    let weighted_len = x_weighted_length(text);
+    if !allow_length && weighted_len > 280 {
+        return Err(AppError::Validation {
+            message: format!(
+                "X post is too long by weighted count: {} > 280.",
+                weighted_len
+            ),
+            suggestion: Some(
+                "Shorten text (URLs count as 23 chars; many non-ASCII/emoji chars count as 2), or use --allow-length to bypass local check."
+                    .to_string(),
+            ),
+            command: Some("outbox publish x --file <path>".to_string()),
+        });
+    }
+
+    Ok(())
+}
+
+fn extract_cashtags(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        if chars[i] != '$' {
+            i += 1;
+            continue;
+        }
+
+        let prev_is_word = if i == 0 {
+            false
+        } else {
+            let p = chars[i - 1];
+            p.is_ascii_alphanumeric() || p == '_'
+        };
+        if prev_is_word {
+            i += 1;
+            continue;
+        }
+
+        let mut j = i + 1;
+        if j >= chars.len() || !chars[j].is_ascii_alphabetic() {
+            i += 1;
+            continue;
+        }
+        j += 1;
+        while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+            j += 1;
+        }
+
+        let next_is_word = if j < chars.len() {
+            let n = chars[j];
+            n.is_ascii_alphanumeric() || n == '_'
+        } else {
+            false
+        };
+        if !next_is_word {
+            let tag: String = chars[i..j].iter().collect();
+            out.push(tag);
+        }
+        i = j;
+    }
+
+    out
+}
+
+fn x_weighted_length(text: &str) -> usize {
+    text.split_whitespace()
+        .map(|token| {
+            if looks_like_url(token) {
+                23
+            } else {
+                token.chars().map(x_char_weight).sum()
+            }
+        })
+        .sum::<usize>()
+        + text.chars().filter(|c| c.is_whitespace()).count()
+}
+
+fn looks_like_url(token: &str) -> bool {
+    let stripped = token
+        .trim_end_matches(|c: char| ",.!?;:)]}\"'".contains(c))
+        .trim_start_matches('(')
+        .trim_start_matches('[')
+        .trim_start_matches('{');
+    let lower = stripped.to_ascii_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://")) && Url::parse(stripped).is_ok()
+}
+
+fn x_char_weight(ch: char) -> usize {
+    if ch.is_ascii() {
+        return 1;
+    }
+    if is_cjk(ch) || is_emoji_like(ch) {
+        return 2;
+    }
+    2
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x11FF
+            | 0x2E80..=0x2EFF
+            | 0x2F00..=0x2FDF
+            | 0x2FF0..=0x2FFF
+            | 0x3000..=0x303F
+            | 0x3040..=0x309F
+            | 0x30A0..=0x30FF
+            | 0x3100..=0x312F
+            | 0x3130..=0x318F
+            | 0x31A0..=0x31BF
+            | 0x31C0..=0x31EF
+            | 0x31F0..=0x31FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0x20000..=0x2FA1F
+    )
+}
+
+fn is_emoji_like(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1F300..=0x1F5FF
+            | 0x1F600..=0x1F64F
+            | 0x1F680..=0x1F6FF
+            | 0x1F700..=0x1F77F
+            | 0x1F780..=0x1F7FF
+            | 0x1F800..=0x1F8FF
+            | 0x1F900..=0x1F9FF
+            | 0x1FA00..=0x1FAFF
+            | 0x2600..=0x26FF
+            | 0x2700..=0x27BF
+    )
+}
+
+fn is_generic_x_forbidden(api_error: Option<&Value>) -> bool {
+    let Some(err) = api_error else {
+        return false;
+    };
+    let detail = err
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let title = err
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let typ = err
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    detail == "you are not permitted to perform this action."
+        && title == "forbidden"
+        && typ == "about:blank"
 }
 
 fn load_linkedin_auth() -> Result<LinkedinAuth, AppError> {
@@ -1411,6 +2070,130 @@ fn env_non_empty(key: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+#[derive(Copy, Clone)]
+enum PublishPlatformKind {
+    Linkedin,
+    X,
+}
+
+fn signature_cli_override(add_signature: bool, no_signature: bool) -> Option<bool> {
+    if add_signature {
+        Some(true)
+    } else if no_signature {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn resolve_signature_text(
+    config: &RuntimeConfig,
+    platform: PublishPlatformKind,
+    cli_override_enabled: Option<bool>,
+) -> Result<Option<String>, AppError> {
+    let platform_layer = match platform {
+        PublishPlatformKind::Linkedin => &config.linkedin_signature,
+        PublishPlatformKind::X => &config.x_signature,
+    };
+    let platform_name = match platform {
+        PublishPlatformKind::Linkedin => "linkedin",
+        PublishPlatformKind::X => "x",
+    };
+
+    let enabled = cli_override_enabled
+        .or(platform_layer.enabled)
+        .or(config.global_signature.enabled)
+        .unwrap_or(false);
+
+    if !enabled {
+        return Ok(None);
+    }
+
+    let text = platform_layer
+        .text
+        .as_ref()
+        .or(config.global_signature.text.as_ref())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or(AppError::Validation {
+            message: format!(
+                "Signature is enabled for {} but no signature text is configured.",
+                platform_name
+            ),
+            suggestion: Some(
+                "Set [signature].text (or [platform.<name>.signature].text) in config.toml."
+                    .to_string(),
+            ),
+            command: None,
+        })?;
+
+    Ok(Some(text))
+}
+
+fn x_author_key() -> String {
+    env_non_empty("X_AUTHOR_ID")
+        .or_else(|| env_non_empty("X_AUTHOR_HANDLE"))
+        .unwrap_or_else(|| "x:self".to_string())
+}
+
+fn ensure_x_required_scopes(input: &str) -> String {
+    let mut parts: Vec<String> = input
+        .split_whitespace()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    for required in ["tweet.read", "tweet.write", "users.read"] {
+        if !parts.iter().any(|p| p == required) {
+            parts.push(required.to_string());
+        }
+    }
+
+    if !parts.iter().any(|p| p == "offline.access") {
+        parts.push("offline.access".to_string());
+    }
+
+    parts.join(" ")
+}
+
+fn maybe_block_duplicate(
+    platform: &str,
+    author_key: &str,
+    fingerprint: &str,
+    content_sha256: &str,
+    allow_duplicate: bool,
+) -> Result<(), AppError> {
+    if allow_duplicate {
+        return Ok(());
+    }
+    if let Some(existing) = find_existing_publish(platform, author_key, fingerprint)? {
+        return Err(AppError::DuplicatePublish {
+            message: "Duplicate publish blocked for same platform/author/content.".to_string(),
+            existing_post_id: existing.post_id,
+            existing_post_url: existing.post_url,
+            content_sha256: content_sha256.to_string(),
+            existing_published_at: existing.published_at,
+        });
+    }
+    Ok(())
+}
+
+fn attach_publish_metadata(
+    value: &mut Value,
+    fingerprint: &str,
+    content_sha256: &str,
+    duplicate_checked: bool,
+) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "duplicate_guard".to_string(),
+            json!(if duplicate_checked { "checked" } else { "bypassed" }),
+        );
+        obj.insert("fingerprint".to_string(), json!(fingerprint));
+        obj.insert("content_sha256".to_string(), json!(content_sha256));
+    }
 }
 
 fn compute_fingerprint(platform: &str, author_urn: &str, commentary: &str) -> String {
@@ -1657,7 +2440,7 @@ fn upsert_env_value(key: &str, value: &str) -> Result<(), AppError> {
         }
         if let Some((existing_key, _)) = line.split_once('=') {
             if existing_key.trim() == key {
-                *line = format!("{key}={value}");
+                *line = format!("{key}={}", format_env_value(value));
                 found = true;
                 break;
             }
@@ -1665,7 +2448,7 @@ fn upsert_env_value(key: &str, value: &str) -> Result<(), AppError> {
     }
 
     if !found {
-        lines.push(format!("{key}={value}"));
+        lines.push(format!("{key}={}", format_env_value(value)));
     }
 
     let output = if lines.is_empty() {
@@ -1677,6 +2460,21 @@ fn upsert_env_value(key: &str, value: &str) -> Result<(), AppError> {
     fs::write(ENV_PATH, output).map_err(|err| AppError::Io {
         message: format!("Failed to write .env: {err}"),
     })
+}
+
+fn format_env_value(value: &str) -> String {
+    let needs_quotes = value.chars().any(|ch| ch.is_whitespace() || ch == '#' || ch == '"' || ch == '\'');
+    if !needs_quotes {
+        return value.to_string();
+    }
+
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{escaped}\"")
 }
 
 fn print_json<T: Serialize>(value: &T, pretty: bool) {

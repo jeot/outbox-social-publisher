@@ -3,7 +3,7 @@
 Local-first CLI for publishing content from files.
 
 Current status: LinkedIn text publishing MVP in progress.
-X text publishing (env-token path) is now available.
+X text publishing is available via guided OAuth 2.0 login.
 
 ## Prerequisites
 
@@ -26,6 +26,22 @@ Set in `config.toml`:
 ```toml
 [output]
 pretty_json = true
+```
+
+Optional signature config (global + per-platform override):
+
+```toml
+[signature]
+enabled = true
+text = "\n[Sent from outbox, by shk]"
+
+[platform.linkedin.signature]
+enabled = true
+# text = "\n[Sent from outbox, by shk]"
+
+[platform.x.signature]
+enabled = false
+# text = "\n[Sent from outbox, by shk]"
 ```
 
 3. Follow LinkedIn app setup and OAuth steps in the next sections.
@@ -63,30 +79,120 @@ Useful references:
 Set these values in `.env`:
 
 ```dotenv
+# LinkedIn app credentials/settings
 LINKEDIN_CLIENT_ID=
 LINKEDIN_CLIENT_SECRET=
 LINKEDIN_REDIRECT_URI=http://localhost:8788/callback
 LINKEDIN_SCOPES='w_member_social openid profile'
+
+# LinkedIn runtime auth values
 LINKEDIN_ACCESS_TOKEN=
 LINKEDIN_REFRESH_TOKEN=
 LINKEDIN_ACCESS_TOKEN_EXPIRES_IN=
 LINKEDIN_REFRESH_TOKEN_EXPIRES_IN=
 LINKEDIN_AUTHOR_URN=urn:li:person:
 LINKEDIN_API_VERSION=202607
-X_ACCESS_TOKEN=
+
+# X app credentials/settings
 X_CLIENT_ID=
 X_CLIENT_SECRET=
 X_REDIRECT_URI=http://127.0.0.1:8789/callback
-X_SCOPES='tweet.write users.read offline.access'
+X_SCOPES='tweet.read tweet.write users.read offline.access'
+
+# X runtime auth values
+X_ACCESS_TOKEN=
 X_REFRESH_TOKEN=
 X_ACCESS_TOKEN_EXPIRES_IN=
 ```
 
 ## X Quick Start (Guided OAuth 2.0)
 
-1. Configure your X app OAuth 2.0 callback URL to exactly match `X_REDIRECT_URI`.
-2. Set `X_CLIENT_ID` (and optionally `X_CLIENT_SECRET`) in `.env`.
-3. Run guided login:
+### Billing heads-up (important)
+
+X API posting uses **pay-per-usage** pricing. Before testing publish calls, verify your project has available credits.
+
+- Open [X Developer Console](https://console.x.com/)
+- Go to your Project/App billing
+- Add credits in **Billing → Credits**
+
+If credits are depleted, publish returns an explicit `402` error:
+
+```json
+{
+  "ok": false,
+  "error_type": "http_error",
+  "message": "X API returned 402",
+  "http_status": 402,
+  "api_error": {
+    "detail": "credits depleted",
+    "status": 402,
+    "title": "Payment Required",
+    "type": "https://api.x.com/2/problems/credits-depleted"
+  },
+  "retryable": false,
+  "suggestion": "X API credits are depleted for this app/project. Enable billing or upgrade access in X Developer Portal, then retry publish.",
+  "command": null
+}
+```
+
+URL-cost behavior observed during testing:
+
+- Posts containing explicit `https://...` or `http://...` were billed as **with URL** requests.
+- Bare domains like `google.com` and `shamimkeshani.ir` were not billed at the higher URL rate in our tests.
+
+Because provider billing behavior can change, verify current rates and categories in X pricing docs and your usage dashboard.
+
+### 1) Create/Configure app in X Console
+
+Open [X Developer Console](https://console.x.com/) and create/select your Project + App.
+
+In **User authentication settings** (OAuth 2.0), use:
+
+- **Type of App**: `Native App` (`Public client`)
+- **App permissions**: `Read and write`
+- **Request email from users**: `Off` (not needed for posting)
+- **Callback / Redirect URL**: exactly `http://127.0.0.1:8789/callback`
+- **Website URL**: your repo URL (for example `https://github.com/jeot/outbox-social-publisher`)
+
+Save settings.
+
+### 2) Copy OAuth 2.0 keys and set `.env`
+
+From X Console, copy:
+
+- `X_CLIENT_ID` (from OAuth 2.0 Keys)
+- `X_CLIENT_SECRET` (if shown for your app type/settings)
+
+Set:
+
+- `X_REDIRECT_URI=http://127.0.0.1:8789/callback`
+- `X_SCOPES='tweet.read tweet.write users.read offline.access'`
+
+### 3) Understand key naming (important)
+
+X Console may also show:
+
+- `X_CONSUMER_KEY`
+- `X_SECRET_KEY`
+- `X_BEARER_TOKEN`
+
+These are app-level credentials from API key/bearer models and are **not** the `X_ACCESS_TOKEN` used by this CLI OAuth 2.0 user flow.
+
+For this repository flow, use:
+
+- `X_CLIENT_ID`
+- `X_CLIENT_SECRET` (if present)
+- `X_REDIRECT_URI`
+- `X_SCOPES`
+
+Then `outbox auth x login` obtains and saves:
+
+- `X_ACCESS_TOKEN`
+- optional `X_REFRESH_TOKEN`
+
+You can remove `X_CONSUMER_KEY`, `X_SECRET_KEY`, and `X_BEARER_TOKEN` from `.env` if you are not implementing OAuth 1.0a/app-only endpoints.
+
+### 4) Run guided login
 
 ```bash
 cargo run -- auth x login
@@ -100,7 +206,7 @@ Behavior:
 - exchanges code for token and saves `.env`
 - shows success/failure in both browser and terminal
 
-4. Publish:
+### 5) Publish
 
 ```bash
 cargo run -- publish x --file ./post.md
@@ -146,41 +252,53 @@ Expected JSON (first run):
 }
 ```
 
-2. Start OAuth login:
+2. Start OAuth login (guided flow):
 
 ```bash
 cargo run -- auth linkedin login
 ```
 
-Optional: auto-open default browser (also prints URL):
+What it does:
 
-```bash
-cargo run -- auth linkedin login --open-browser
-```
+- starts a localhost callback server from `LINKEDIN_REDIRECT_URI`
+- opens browser (and also prints the auth URL)
+- waits for callback (Ctrl-C cancels)
+- exchanges code for tokens automatically
+- resolves `/v2/userinfo` automatically and saves `LINKEDIN_AUTHOR_URN`
+- shows matched status in browser + terminal JSON
 
 Expected JSON:
 
 ```json
 {
-  "auth_url": "https://www.linkedin.com/oauth/v2/authorization?...",
   "browser_opened": true,
-  "mode": "auth_login",
-  "next_command": "outbox auth linkedin exchange --code <code-from-redirect-url> --state <state-from-login>",
-  "note": "Open auth_url in a browser, approve access, then copy the code query parameter from redirect URL.",
+  "access_token_saved": true,
+  "access_token_expires_in": 5183999,
+  "author_urn": "urn:li:person:<id>",
+  "author_urn_saved_to_env": true,
+  "mode": "auth_linkedin_login",
+  "name": "<member name>",
+  "next": {
+    "command": "outbox publish linkedin --file <path>",
+    "message": "LinkedIn auth completed. You can publish now."
+  },
   "ok": true,
   "platform": "linkedin",
-  "state": "<state>"
+  "refresh_token_saved": false
 }
 ```
 
-3. After approval, LinkedIn redirects to your `redirect_uri`.
-   Copy the `code` query parameter from that URL and run:
+3. Optional manual fallback (only if callback flow is unavailable):
 
 ```bash
 cargo run -- auth linkedin exchange --code <copied-code> --state <state-from-login>
 ```
 
-This stores token values in your local `.env`.
+This exchanges and stores token values in your local `.env`. Then run:
+
+```bash
+cargo run -- auth linkedin whoami
+```
 
 Expected JSON:
 
@@ -199,30 +317,7 @@ Expected JSON:
 }
 ```
 
-4. Resolve and save author URN automatically:
-
-```bash
-cargo run -- auth linkedin whoami
-```
-
-Expected JSON:
-
-```json
-{
-  "author_urn": "urn:li:person:<id>",
-  "author_urn_saved_to_env": true,
-  "mode": "auth_whoami",
-  "name": "<member name>",
-  "next": {
-    "command": "outbox publish linkedin --file <path>",
-    "message": "Author URN is ready. You can publish now."
-  },
-  "ok": true,
-  "platform": "linkedin"
-}
-```
-
-5. Check current token availability/state:
+4. Check current token availability/state:
 
 ```bash
 cargo run -- auth linkedin token-status
@@ -243,7 +338,7 @@ Expected JSON:
 }
 ```
 
-6. Force a refresh attempt (for explicit verification):
+5. Force a refresh attempt (for explicit verification):
 
 ```bash
 cargo run -- auth linkedin token-refresh
@@ -348,6 +443,22 @@ Example override:
 
 ```bash
 cargo run -- publish linkedin --file ./post.md --allow-duplicate
+```
+
+Signature behavior:
+
+- Precedence: CLI flag > platform config > global config > off
+- CLI flags (both LinkedIn and X):
+  - `--add-signature` force add signature for this run
+  - `--no-signature` force disable signature for this run
+- If signature is enabled but no text is configured, publish returns validation error.
+
+Examples:
+
+```bash
+cargo run -- publish linkedin --file ./post.md --add-signature
+cargo run -- publish linkedin --file ./post.md --no-signature
+cargo run -- publish x --file ./post.md --add-signature
 ```
 
 Local publish history is stored in `.outbox/publish-log.jsonl`.
