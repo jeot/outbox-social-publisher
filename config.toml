@@ -1,0 +1,6 @@
+[output]
+pretty_json = true
+
+[timeouts]
+connect_seconds = 10
+request_seconds = 30
