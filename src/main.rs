@@ -10,10 +10,12 @@ use rand::Rng;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use urlencoding::encode;
 
 const DEFAULT_LINKEDIN_VERSION: &str = "202601";
 const OAUTH_STATE_PATH: &str = ".outbox/linkedin_oauth_state";
+const PUBLISH_LOG_PATH: &str = ".outbox/publish-log.jsonl";
 const ENV_PATH: &str = ".env";
 
 #[derive(Debug, Parser)]
@@ -47,6 +49,10 @@ struct PublishLinkedinArgs {
     file: PathBuf,
     #[arg(long)]
     timeout_seconds: Option<u64>,
+    #[arg(long, default_value_t = false)]
+    allow_duplicate: bool,
+    #[arg(long, default_value_t = false)]
+    debug_payload: bool,
 }
 
 #[derive(Debug, Args)]
@@ -72,6 +78,8 @@ enum AuthLinkedinCommand {
     Login(AuthLinkedinLoginArgs),
     Exchange(AuthLinkedinExchangeArgs),
     Whoami,
+    TokenStatus,
+    TokenRefresh,
 }
 
 #[derive(Debug, Args)]
@@ -154,6 +162,23 @@ struct ErrorOutput {
     command: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PublishLogEntry {
+    platform: String,
+    author_urn: String,
+    file_path: String,
+    fingerprint: String,
+    #[serde(default)]
+    content_sha256: String,
+    #[serde(default)]
+    post_id: Option<String>,
+    #[serde(default)]
+    post_url: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    published_at: String,
+}
+
 #[derive(Debug)]
 enum AppError {
     Validation {
@@ -175,6 +200,13 @@ enum AppError {
         api_error: Option<Value>,
         retryable: bool,
     },
+    DuplicatePublish {
+        message: String,
+        existing_post_id: Option<String>,
+        existing_post_url: Option<String>,
+        content_sha256: String,
+        existing_published_at: String,
+    },
 }
 
 impl AppError {
@@ -184,6 +216,7 @@ impl AppError {
             AppError::MissingAuth { .. } => 3,
             AppError::Io { .. } => 4,
             AppError::Http { .. } => 5,
+            AppError::DuplicatePublish { .. } => 6,
         }
     }
 
@@ -242,6 +275,27 @@ impl AppError {
                 suggestion: Some("Inspect api_error for provider details and retry when resolved.".to_string()),
                 command: None,
             },
+            AppError::DuplicatePublish {
+                message,
+                existing_post_id,
+                existing_post_url,
+                content_sha256,
+                existing_published_at,
+            } => ErrorOutput {
+                ok: false,
+                error_type: "duplicate_publish",
+                message: message.clone(),
+                http_status: None,
+                api_error: Some(json!({
+                    "existing_post_id": existing_post_id,
+                    "existing_post_url": existing_post_url,
+                    "content_sha256": content_sha256,
+                    "existing_published_at": existing_published_at
+                })),
+                retryable: false,
+                suggestion: Some("Use --allow-duplicate to bypass duplicate guard intentionally.".to_string()),
+                command: None,
+            },
         }
     }
 }
@@ -249,6 +303,7 @@ impl AppError {
 #[derive(Debug)]
 struct LinkedinAuth {
     access_token: String,
+    refresh_token: Option<String>,
     author_urn: String,
     version: String,
 }
@@ -269,6 +324,8 @@ async fn main() -> ExitCode {
                 AuthLinkedinCommand::Login(args) => start_linkedin_login(args),
                 AuthLinkedinCommand::Exchange(args) => exchange_linkedin_code(args, &config).await,
                 AuthLinkedinCommand::Whoami => resolve_linkedin_author_urn(&config).await,
+                AuthLinkedinCommand::TokenStatus => show_linkedin_token_status(),
+                AuthLinkedinCommand::TokenRefresh => run_linkedin_token_refresh(&config).await,
             },
         },
     };
@@ -587,6 +644,51 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
     }))
 }
 
+fn show_linkedin_token_status() -> Result<Value, AppError> {
+    let access_token = env_non_empty("LINKEDIN_ACCESS_TOKEN");
+    let refresh_token = env_non_empty("LINKEDIN_REFRESH_TOKEN");
+    let access_token_expires_in = env_non_empty("LINKEDIN_ACCESS_TOKEN_EXPIRES_IN");
+    let refresh_token_expires_in = env_non_empty("LINKEDIN_REFRESH_TOKEN_EXPIRES_IN");
+    let author_urn = env_non_empty("LINKEDIN_AUTHOR_URN");
+
+    Ok(json!({
+        "ok": true,
+        "platform": "linkedin",
+        "mode": "auth_token_status",
+        "access_token_present": access_token.is_some(),
+        "refresh_token_present": refresh_token.is_some(),
+        "author_urn_present": author_urn.is_some(),
+        "access_token_expires_in": access_token_expires_in,
+        "refresh_token_expires_in": refresh_token_expires_in
+    }))
+}
+
+async fn run_linkedin_token_refresh(config: &RuntimeConfig) -> Result<Value, AppError> {
+    let refresh_token = env_non_empty("LINKEDIN_REFRESH_TOKEN").ok_or(AppError::MissingAuth {
+        message: "No LinkedIn refresh token found.".to_string(),
+        suggestion: Some(
+            "Publish already attempts automatic refresh when access token fails. If publish fails, check token-status and retry token-refresh; if that still fails, run login and exchange."
+                .to_string(),
+        ),
+        command: Some("outbox auth linkedin token-status".to_string()),
+    })?;
+
+    let refreshed = refresh_linkedin_access_token(refresh_token, config).await?;
+
+    Ok(json!({
+        "ok": true,
+        "platform": "linkedin",
+        "mode": "auth_token_refresh",
+        "token_refreshed": true,
+        "access_token_expires_in": refreshed.expires_in,
+        "refresh_token_saved": refreshed.refresh_token.is_some(),
+        "next": {
+            "message": "Token refresh completed.",
+            "command": "outbox auth linkedin token-status"
+        }
+    }))
+}
+
 async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     if !args.file.exists() {
         return Err(AppError::Validation {
@@ -600,16 +702,57 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         message: format!("Failed to read content file: {err}"),
     })?;
 
-    let commentary = content.trim().to_string();
-    if commentary.is_empty() {
+    let commentary_raw = content.trim().to_string();
+    if commentary_raw.is_empty() {
         return Err(AppError::Validation {
             message: "Content file is empty after trimming whitespace.".to_string(),
             suggestion: Some("Add post text to the file.".to_string()),
             command: None,
         });
     }
+    let commentary = escape_little_text_plain(&commentary_raw);
 
     let auth = load_linkedin_auth()?;
+    let content_sha256 = compute_content_sha256(content.as_bytes());
+    let fingerprint = compute_fingerprint("linkedin", &auth.author_urn, &commentary_raw);
+    let payload = json!({
+        "author": auth.author_urn,
+        "commentary": commentary,
+        "visibility": "PUBLIC",
+        "distribution": {
+            "feedDistribution": "MAIN_FEED",
+            "targetEntities": [],
+            "thirdPartyDistributionChannels": []
+        },
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": false
+    });
+
+    if args.debug_payload {
+        return Ok(json!({
+            "ok": true,
+            "platform": "linkedin",
+            "mode": "debug_payload",
+            "commentary_raw": commentary_raw,
+            "commentary_escaped": commentary,
+            "payload": payload,
+            "fingerprint": fingerprint,
+            "content_sha256": content_sha256
+        }));
+    }
+
+    if !args.allow_duplicate {
+        if let Some(existing) = find_existing_publish("linkedin", &auth.author_urn, &fingerprint)? {
+            return Err(AppError::DuplicatePublish {
+                message: "Duplicate publish blocked for same platform/author/content.".to_string(),
+                existing_post_id: existing.post_id,
+                existing_post_url: existing.post_url,
+                content_sha256,
+                existing_published_at: existing.published_at,
+            });
+        }
+    }
+
     let request_timeout = args
         .timeout_seconds
         .map(Duration::from_secs)
@@ -625,19 +768,6 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
             api_error: None,
             retryable: false,
         })?;
-
-    let payload = json!({
-        "author": auth.author_urn,
-        "commentary": commentary,
-        "visibility": "PUBLIC",
-        "distribution": {
-            "feedDistribution": "MAIN_FEED",
-            "targetEntities": [],
-            "thirdPartyDistributionChannels": []
-        },
-        "lifecycleState": "PUBLISHED",
-        "isReshareDisabledByAuthor": false
-    });
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -664,9 +794,9 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         HeaderValue::from_static("2.0.0"),
     );
 
-    let response = client
+    let mut response = client
         .post("https://api.linkedin.com/rest/posts")
-        .headers(headers)
+        .headers(headers.clone())
         .json(&payload)
         .send()
         .await
@@ -676,6 +806,39 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
             api_error: None,
             retryable: err.is_timeout() || err.is_connect(),
         })?;
+
+    let mut token_refreshed = false;
+    if should_try_refresh(response.status()) {
+        if let Some(refresh_token) = auth.refresh_token.clone() {
+            let refreshed = refresh_linkedin_access_token(refresh_token, config).await?;
+            token_refreshed = true;
+
+            let mut retry_headers = headers.clone();
+            retry_headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", refreshed.access_token)).map_err(|err| {
+                    AppError::Validation {
+                        message: format!("Invalid refreshed access token format: {err}"),
+                        suggestion: Some("Re-run auth flow and retry publish.".to_string()),
+                        command: Some("outbox auth linkedin login".to_string()),
+                    }
+                })?,
+            );
+
+            response = client
+                .post("https://api.linkedin.com/rest/posts")
+                .headers(retry_headers)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|err| AppError::Http {
+                    message: format!("LinkedIn retry request failed after refresh: {err}"),
+                    status: None,
+                    api_error: None,
+                    retryable: err.is_timeout() || err.is_connect(),
+                })?;
+        }
+    }
 
     let status = response.status();
     let request_id = response
@@ -701,19 +864,45 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         .and_then(|v| v.as_str())
         .map(|v| v.to_string())
         .or(request_id.clone());
+    let post_url = post_id
+        .as_ref()
+        .map(|id| format!("https://www.linkedin.com/feed/update/{id}/"));
 
+    let published_at = Utc::now().to_rfc3339();
     let output = SuccessOutput {
         ok: true,
         platform: "linkedin",
-        post_id,
-        post_url: None,
-        request_id,
-        published_at: Utc::now().to_rfc3339(),
+        post_id: post_id.clone(),
+        post_url: post_url.clone(),
+        request_id: request_id.clone(),
+        published_at: published_at.clone(),
     };
 
-    serde_json::to_value(output).map_err(|err| AppError::Io {
+    let mut value = serde_json::to_value(output).map_err(|err| AppError::Io {
         message: format!("Failed to serialize success output: {err}"),
-    })
+    })?;
+
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("token_refreshed".to_string(), json!(token_refreshed));
+        obj.insert("duplicate_guard".to_string(), json!("checked"));
+        obj.insert("fingerprint".to_string(), json!(fingerprint.clone()));
+        obj.insert("content_sha256".to_string(), json!(content_sha256.clone()));
+    }
+
+    let log_entry = PublishLogEntry {
+        platform: "linkedin".to_string(),
+        author_urn: auth.author_urn,
+        file_path: args.file.display().to_string(),
+        fingerprint,
+        content_sha256,
+        post_id,
+        post_url,
+        request_id,
+        published_at,
+    };
+    append_publish_log(&log_entry)?;
+
+    Ok(value)
 }
 
 fn load_linkedin_auth() -> Result<LinkedinAuth, AppError> {
@@ -735,12 +924,188 @@ fn load_linkedin_auth() -> Result<LinkedinAuth, AppError> {
 
     let version =
         env::var("LINKEDIN_API_VERSION").unwrap_or_else(|_| DEFAULT_LINKEDIN_VERSION.to_string());
+    let refresh_token = env_non_empty("LINKEDIN_REFRESH_TOKEN");
 
     Ok(LinkedinAuth {
         access_token,
+        refresh_token,
         author_urn,
         version,
     })
+}
+
+fn env_non_empty(key: &str) -> Option<String> {
+    let value = env::var(key).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn compute_fingerprint(platform: &str, author_urn: &str, commentary: &str) -> String {
+    let normalized = commentary.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut hasher = Sha256::new();
+    hasher.update(platform.as_bytes());
+    hasher.update(b"|");
+    hasher.update(author_urn.as_bytes());
+    hasher.update(b"|");
+    hasher.update(normalized.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn escape_little_text_plain(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '|' | '{' | '}' | '@' | '[' | ']' | '(' | ')' | '<' | '>' | '#' | '\\' | '*' | '_'
+            | '~' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn compute_content_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn find_existing_publish(
+    platform: &str,
+    author_urn: &str,
+    fingerprint: &str,
+) -> Result<Option<PublishLogEntry>, AppError> {
+    let Ok(raw) = fs::read_to_string(PUBLISH_LOG_PATH) else {
+        return Ok(None);
+    };
+
+    for line in raw.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: PublishLogEntry = serde_json::from_str(line).map_err(|err| AppError::Io {
+            message: format!("Failed to parse publish log entry: {err}"),
+        })?;
+        if entry.platform == platform
+            && entry.author_urn == author_urn
+            && entry.fingerprint == fingerprint
+        {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
+}
+
+fn append_publish_log(entry: &PublishLogEntry) -> Result<(), AppError> {
+    fs::create_dir_all(".outbox").map_err(|err| AppError::Io {
+        message: format!("Failed to create .outbox directory: {err}"),
+    })?;
+    let line = serde_json::to_string(entry).map_err(|err| AppError::Io {
+        message: format!("Failed to encode publish log entry: {err}"),
+    })?;
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(PUBLISH_LOG_PATH)
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to open publish log: {err}"),
+        })?;
+    writeln!(file, "{line}").map_err(|err| AppError::Io {
+        message: format!("Failed to append publish log: {err}"),
+    })
+}
+
+fn should_try_refresh(status: reqwest::StatusCode) -> bool {
+    status.as_u16() == 401
+}
+
+async fn refresh_linkedin_access_token(
+    refresh_token: String,
+    config: &RuntimeConfig,
+) -> Result<TokenExchangeResponse, AppError> {
+    let client_id = env::var("LINKEDIN_CLIENT_ID").map_err(|_| AppError::MissingAuth {
+        message: "LINKEDIN_CLIENT_ID is missing.".to_string(),
+        suggestion: Some("Set LINKEDIN_CLIENT_ID in .env from your LinkedIn app settings.".to_string()),
+        command: Some("outbox auth linkedin guide".to_string()),
+    })?;
+    let client_secret = env::var("LINKEDIN_CLIENT_SECRET").map_err(|_| AppError::MissingAuth {
+        message: "LINKEDIN_CLIENT_SECRET is missing.".to_string(),
+        suggestion: Some("Set LINKEDIN_CLIENT_SECRET in .env from your LinkedIn app settings.".to_string()),
+        command: Some("outbox auth linkedin guide".to_string()),
+    })?;
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(config.connect_timeout)
+        .timeout(config.request_timeout)
+        .build()
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to build HTTP client: {err}"),
+            status: None,
+            api_error: None,
+            retryable: false,
+        })?;
+
+    let params = [
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+    ];
+
+    let response = client
+        .post("https://www.linkedin.com/oauth/v2/accessToken")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("LinkedIn token refresh request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let maybe_json = response.json::<Value>().await.ok();
+        return Err(AppError::Http {
+            message: format!("LinkedIn token refresh returned {}", status.as_u16()),
+            status: Some(status.as_u16()),
+            api_error: maybe_json,
+            retryable: status.is_server_error() || status.as_u16() == 429,
+        });
+    }
+
+    let body = response
+        .json::<TokenExchangeResponse>()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to parse token refresh response: {err}"),
+            status: Some(200),
+            api_error: None,
+            retryable: false,
+        })?;
+
+    upsert_env_value("LINKEDIN_ACCESS_TOKEN", &body.access_token)?;
+    if let Some(expires_in) = body.expires_in {
+        upsert_env_value("LINKEDIN_ACCESS_TOKEN_EXPIRES_IN", &expires_in.to_string())?;
+    }
+    if let Some(new_refresh_token) = body.refresh_token.clone() {
+        upsert_env_value("LINKEDIN_REFRESH_TOKEN", &new_refresh_token)?;
+    }
+    if let Some(refresh_expires_in) = body.refresh_token_expires_in {
+        upsert_env_value(
+            "LINKEDIN_REFRESH_TOKEN_EXPIRES_IN",
+            &refresh_expires_in.to_string(),
+        )?;
+    }
+
+    Ok(body)
 }
 
 fn generate_state(length: usize) -> String {

@@ -16,10 +16,10 @@
 - [x] Implement LinkedIn OAuth setup flow for a single personal account.
 - [x] Add non-interactive auth commands: `guide`, `login`, `exchange --code --state`, `whoami`.
 - [x] Store OAuth tokens in `.env` (local, not committed).
-- [ ] Add automatic access-token refresh using refresh token.
+- [x] Add automatic access-token refresh using refresh token.
 - [x] Implement LinkedIn "publish text post as-is" adapter.
-- [ ] Add duplicate-publish guard for immediate retries.
-- [ ] Add deterministic idempotency key generation for publish requests.
+- [x] Add duplicate-publish guard for immediate retries.
+- [x] Add deterministic idempotency key generation for publish requests.
 - [x] Return API error details transparently in JSON output.
 - [x] Write setup guide for another user on macOS, Linux, and Windows.
 - [ ] Build and test release binaries for macOS, Linux, and Windows.

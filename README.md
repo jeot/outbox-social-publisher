@@ -176,6 +176,50 @@ Expected JSON:
 }
 ```
 
+5. Check current token availability/state:
+
+```bash
+cargo run -- auth linkedin token-status
+```
+
+Expected JSON:
+
+```json
+{
+  "ok": true,
+  "platform": "linkedin",
+  "mode": "auth_token_status",
+  "access_token_present": true,
+  "refresh_token_present": false,
+  "author_urn_present": true,
+  "access_token_expires_in": "5183999",
+  "refresh_token_expires_in": null
+}
+```
+
+6. Force a refresh attempt (for explicit verification):
+
+```bash
+cargo run -- auth linkedin token-refresh
+```
+
+Expected success JSON:
+
+```json
+{
+  "ok": true,
+  "platform": "linkedin",
+  "mode": "auth_token_refresh",
+  "token_refreshed": true,
+  "access_token_expires_in": 5183999,
+  "refresh_token_saved": true,
+  "next": {
+    "message": "Token refresh completed.",
+    "command": "outbox auth linkedin token-status"
+  }
+}
+```
+
 ## First Publish
 
 1. Create a text file with the post content.
@@ -194,7 +238,8 @@ Expected success JSON:
   "post_id": "<linkedin-post-id-or-restli-id>",
   "post_url": null,
   "request_id": "<restli-id>",
-  "published_at": "2026-08-15T12:34:56Z"
+  "published_at": "2026-08-15T12:34:56Z",
+  "token_refreshed": false
 }
 ```
 
@@ -211,6 +256,23 @@ Historical first live publish output:
 }
 ```
 
+Recent publish output with link and content hash:
+
+```json
+{
+  "content_sha256": "af2ba976553469d7f44589354dfba2f8628a29809c8b270235484c779d541024",
+  "duplicate_guard": "checked",
+  "fingerprint": "1d9469a2e2b19154b6296d7cd4b06f3e34f5c7c9193e07fb470658a0064b1acf",
+  "ok": true,
+  "platform": "linkedin",
+  "post_id": "urn:li:share:7494294095167774720",
+  "post_url": "https://www.linkedin.com/feed/update/urn:li:share:7494294095167774720/",
+  "published_at": "2026-08-15T07:29:09.466218+00:00",
+  "request_id": "urn:li:share:7494294095167774720",
+  "token_refreshed": false
+}
+```
+
 Direct post URL format from returned `post_id`:
 
 ```text
@@ -222,6 +284,29 @@ Example:
 ```text
 https://www.linkedin.com/feed/update/urn:li:share:7494283356650733568/
 ```
+
+If access token is expired and refresh token is available, publish automatically:
+
+- refreshes token once
+- retries publish once
+- updates `.env` token values
+- returns `token_refreshed: true` on success after refresh
+
+Duplicate protection:
+
+- publishes are fingerprinted by `platform + author_urn + normalized content`
+- same fingerprint is blocked by default to prevent accidental duplicate posts
+- use `--allow-duplicate` only when you intentionally want to repost
+
+Example override:
+
+```bash
+cargo run -- publish linkedin --file ./post.md --allow-duplicate
+```
+
+Local publish history is stored in `.outbox/publish-log.jsonl`.
+
+`jsonl` means JSON Lines: one JSON object per line. This keeps history append-only and easy to inspect with shell tools.
 
 ## Command Behavior
 
