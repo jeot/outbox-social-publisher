@@ -9,7 +9,7 @@ use axum::extract::{Query, State};
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
@@ -26,7 +26,7 @@ const DEFAULT_LINKEDIN_VERSION: &str = "202601";
 const OAUTH_STATE_PATH: &str = ".outbox/linkedin_oauth_state";
 const PUBLISH_LOG_PATH: &str = ".outbox/publish-log.jsonl";
 const ENV_PATH: &str = ".env";
-const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read offline.access";
+const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read media.write offline.access";
 
 #[derive(Debug, Parser)]
 #[command(name = "outbox")]
@@ -235,6 +235,17 @@ struct XTokenExchangeResponse {
     expires_in: Option<u64>,
     scope: Option<String>,
     refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XMediaUploadResponse {
+    data: Option<XMediaUploadData>,
+    errors: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XMediaUploadData {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1828,17 +1839,24 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
         text.push_str(&signature);
         signature_applied = true;
     }
-    if !parsed.media_paths.is_empty() {
+    if parsed.media_paths.len() > 4 {
         return Err(AppError::Validation {
             message: format!(
-                "X media publish is not implemented yet ({} images found).",
+                "X supports at most 4 images per post; found {}.",
                 parsed.media_paths.len()
             ),
+            suggestion: Some("Reduce image count to 4 or fewer and retry.".to_string()),
+            command: None,
+        });
+    }
+    if !parsed.media_paths.is_empty() && !x_scope_contains("media.write") {
+        return Err(AppError::MissingAuth {
+            message: "X media upload requires media.write scope, but current token scope does not include it.".to_string(),
             suggestion: Some(
-                "Remove image embeds for X publish for now, or publish to LinkedIn where single-image upload is supported."
+                "Set X_SCOPES to include media.write, run `outbox auth x login`, then retry publish."
                     .to_string(),
             ),
-            command: None,
+            command: Some("outbox auth x login".to_string()),
         });
     }
     let bypass_duplicate = args.force || args.allow_duplicate;
@@ -1859,6 +1877,21 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     maybe_block_duplicate("x", &author_key, &fingerprint, &file_sha256, bypass_duplicate)?;
 
     if args.debug {
+        let payload_preview = if parsed.media_paths.is_empty() {
+            json!({ "text": text })
+        } else {
+            json!({
+                "text": text,
+                "media": {
+                    "media_ids": parsed
+                        .media_paths
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("<resolved-via-x-upload-{}>", i + 1))
+                        .collect::<Vec<_>>()
+                }
+            })
+        };
         return Ok(json!({
             "ok": true,
             "platform": "x",
@@ -1868,9 +1901,7 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
             "media_count": parsed.media_paths.len(),
             "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "text": text,
-            "payload": {
-                "text": text
-            },
+            "payload": payload_preview,
             "fingerprint": fingerprint,
             "file_sha256": file_sha256,
             "text_sha256": text_sha256,
@@ -1899,11 +1930,28 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
             retryable: false,
         })?;
 
+    let mut media_ids: Vec<String> = Vec::new();
+    for path in &parsed.media_paths {
+        let media_id = x_upload_media_image(&client, &auth.access_token, path).await?;
+        media_ids.push(media_id);
+    }
+
+    let payload = if media_ids.is_empty() {
+        json!({ "text": text })
+    } else {
+        json!({
+            "text": text,
+            "media": {
+                "media_ids": media_ids
+            }
+        })
+    };
+
     let response = client
         .post("https://api.x.com/2/tweets")
         .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
         .header(CONTENT_TYPE, "application/json")
-        .json(&json!({ "text": text }))
+        .json(&payload)
         .send()
         .await
         .map_err(|err| AppError::Http {
@@ -2002,6 +2050,16 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     );
     if let Some(obj) = value.as_object_mut() {
         obj.insert("signature_applied".to_string(), json!(signature_applied));
+        obj.insert("media_count".to_string(), json!(parsed.media_paths.len()));
+        obj.insert("media_paths".to_string(), json!(
+            parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+        ));
+        obj.insert("media_ids".to_string(), json!(payload
+            .get("media")
+            .and_then(|m| m.get("media_ids"))
+            .cloned()
+            .unwrap_or_else(|| json!([]))
+        ));
     }
 
     let published_at = value
@@ -2503,7 +2561,7 @@ fn ensure_x_required_scopes(input: &str) -> String {
         .map(|s| s.trim().to_string())
         .collect();
 
-    for required in ["tweet.read", "tweet.write", "users.read"] {
+    for required in ["tweet.read", "tweet.write", "users.read", "media.write"] {
         if !parts.iter().any(|p| p == required) {
             parts.push(required.to_string());
         }
@@ -2514,6 +2572,12 @@ fn ensure_x_required_scopes(input: &str) -> String {
     }
 
     parts.join(" ")
+}
+
+fn x_scope_contains(scope: &str) -> bool {
+    env_non_empty("X_SCOPES")
+        .map(|s| s.split_whitespace().any(|p| p == scope))
+        .unwrap_or(false)
 }
 
 fn maybe_block_duplicate(
@@ -2801,6 +2865,97 @@ async fn linkedin_upload_image(
     }
 
     Ok(init_body.value.image)
+}
+
+async fn x_upload_media_image(
+    client: &reqwest::Client,
+    access_token: &str,
+    image_path: &PathBuf,
+) -> Result<String, AppError> {
+    let image_bytes = fs::read(image_path).map_err(|err| AppError::Io {
+        message: format!("Failed to read image '{}': {err}", image_path.display()),
+    })?;
+    let media_b64 = STANDARD.encode(image_bytes);
+    let media_type = media_content_type(image_path)?;
+
+    let response = client
+        .post("https://api.x.com/2/media/upload")
+        .header(AUTHORIZATION, format!("Bearer {}", access_token))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&json!({
+            "media": media_b64,
+            "media_category": "tweet_image",
+            "media_type": media_type
+        }))
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("X media upload request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let status = response.status();
+    if status.as_u16() == 401 {
+        return Err(AppError::MissingAuth {
+            message: "X access token is invalid or expired for media upload.".to_string(),
+            suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
+            command: Some("outbox auth x login".to_string()),
+        });
+    }
+    if status.as_u16() == 403 {
+        return Err(AppError::MissingAuth {
+            message: "X media upload forbidden. Token may be missing media.write scope or app access for media upload.".to_string(),
+            suggestion: Some(
+                "Ensure X_SCOPES includes media.write, re-run outbox auth x login, and verify app/project access."
+                    .to_string(),
+            ),
+            command: Some("outbox auth x login".to_string()),
+        });
+    }
+    if !status.is_success() {
+        let maybe_json = response.json::<Value>().await.ok();
+        return Err(AppError::Http {
+            message: format!("X media upload returned {}", status.as_u16()),
+            status: Some(status.as_u16()),
+            api_error: maybe_json,
+            retryable: status.is_server_error() || status.as_u16() == 429,
+        });
+    }
+
+    let body = response
+        .json::<XMediaUploadResponse>()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to parse X media upload response: {err}"),
+            status: Some(200),
+            api_error: None,
+            retryable: false,
+        })?;
+
+    if let Some(errors) = body.errors {
+        if !errors.is_empty() {
+            return Err(AppError::Http {
+                message: "X media upload returned errors.".to_string(),
+                status: Some(200),
+                api_error: Some(json!({ "errors": errors })),
+                retryable: false,
+            });
+        }
+    }
+
+    let media_id = body
+        .data
+        .map(|d| d.id)
+        .ok_or(AppError::Http {
+            message: "X media upload response missing media id.".to_string(),
+            status: Some(200),
+            api_error: None,
+            retryable: false,
+        })?;
+
+    Ok(media_id)
 }
 
 fn media_content_type(image_path: &PathBuf) -> Result<&'static str, AppError> {

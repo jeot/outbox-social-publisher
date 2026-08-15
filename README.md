@@ -100,7 +100,7 @@ LINKEDIN_API_VERSION=202607
 X_CLIENT_ID=
 X_CLIENT_SECRET=
 X_REDIRECT_URI=http://127.0.0.1:8789/callback
-X_SCOPES='tweet.read tweet.write users.read offline.access'
+X_SCOPES='tweet.read tweet.write users.read media.write offline.access'
 
 # X runtime auth values
 X_ACCESS_TOKEN=
@@ -169,7 +169,7 @@ From X Console, copy:
 Set:
 
 - `X_REDIRECT_URI=http://127.0.0.1:8789/callback`
-- `X_SCOPES='tweet.read tweet.write users.read offline.access'`
+- `X_SCOPES='tweet.read tweet.write users.read media.write offline.access'`
 
 ### 3) Understand key naming (important)
 
@@ -213,6 +213,12 @@ Behavior:
 
 ```bash
 cargo run -- publish x --file ./post.md
+```
+
+For image posts (`![[...]]` embeds in your note), if you changed scopes or first enabled media posting, re-run login so the latest token includes `media.write`:
+
+```bash
+cargo run -- auth x login
 ```
 
 Expected success JSON:
@@ -509,7 +515,7 @@ Current platform status:
 
 - LinkedIn: single-image upload supported (if one image embed is found)
 - LinkedIn: multi-image upload supported (2-20 images, using MultiImage content)
-- X: image publish not wired yet (text-only for now)
+- X: single/multi-image upload supported (up to 4 images per post)
 
 ## Command Behavior
 

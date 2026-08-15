@@ -37,6 +37,7 @@
 - [x] Improve X API error suggestions (credits depleted, cashtag-limit, generic 403 with local hints).
 - [x] Add signature support (global + per-platform config, plus CLI overrides) for LinkedIn and X.
 - [x] Add `file_sha256` + `text_sha256` tracking in output and publish logs.
+- [x] Document and enforce `media.write` scope requirement for X image posts.
 - [ ] Add X token tooling parity commands (`auth x token-status`, `auth x token-refresh`).
 - [ ] Integrate X into scheduler flow and retry/idempotency behavior.
 
@@ -50,7 +51,7 @@
 - [x] Validate media extension (`.png`, `.jpg`, `.jpeg`) and block on invalid/missing files.
 - [x] Add LinkedIn single-image upload flow (`rest/images initializeUpload` + upload + `rest/posts` media content).
 - [x] Add LinkedIn multi-image publish support (MultiImage API, 2-20 images).
-- [ ] Add X image upload/publish support.
+- [x] Add X image upload/publish support (1-4 images via media upload + `media_ids`).
 
 ## Phase 4 - Scheduling and Background Worker (LinkedIn)
 
