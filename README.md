@@ -42,6 +42,9 @@ enabled = true
 [platform.x.signature]
 enabled = false
 # text = "\n[Sent from outbox, by shk]"
+
+[media]
+lookup_paths = ["/absolute/path/to/media-assets"]
 ```
 
 3. Follow LinkedIn app setup and OAuth steps in the next sections.
@@ -397,11 +400,11 @@ Historical first live publish output:
 }
 ```
 
-Recent publish output with link and content hash:
+Recent publish output with link and file hash:
 
 ```json
 {
-  "content_sha256": "af2ba976553469d7f44589354dfba2f8628a29809c8b270235484c779d541024",
+  "file_sha256": "af2ba976553469d7f44589354dfba2f8628a29809c8b270235484c779d541024",
   "duplicate_guard": "checked",
   "fingerprint": "1d9469a2e2b19154b6296d7cd4b06f3e34f5c7c9193e07fb470658a0064b1acf",
   "ok": true,
@@ -461,9 +464,52 @@ cargo run -- publish linkedin --file ./post.md --no-signature
 cargo run -- publish x --file ./post.md --add-signature
 ```
 
+Debug mode (no publish side effects):
+
+- Use `--debug` to validate and preview a publish without sending it.
+- It validates file parsing, media resolution, text cleanup, duplicate guard rules, and preflight checks.
+- It returns parsed text, resolved media paths, and payload preview JSON.
+
+Examples:
+
+```bash
+cargo run -- publish linkedin --file ./post.md --debug
+cargo run -- publish x --file ./post.md --debug
+```
+
 Local publish history is stored in `.outbox/publish-log.jsonl`.
 
 `jsonl` means JSON Lines: one JSON object per line. This keeps history append-only and easy to inspect with shell tools.
+
+## Obsidian Markdown Parsing Rules
+
+`--file` can be an Obsidian note. Parsing behavior:
+
+- Image embeds are discovered from the **entire file** in order: `![[...]]`
+- Publish text is the section **after the last** `---` separator line
+  - If only one `---` exists, text is after that separator
+  - If no `---` exists, full file is treated as publish text
+- `![[...]]` placeholders are removed from publish text before sending
+- Final text is trimmed at start/end
+
+Media resolution order:
+
+1. Note's own folder
+2. `config.toml` `[media].lookup_paths` entries (in order)
+
+Allowed image extensions:
+
+- `.png`
+- `.jpg`
+- `.jpeg`
+
+If a referenced image is missing or unsupported, publish is blocked with a validation error.
+
+Current platform status:
+
+- LinkedIn: single-image upload supported (if one image embed is found)
+- LinkedIn: multiple images currently blocked (MultiImage API not wired yet)
+- X: image publish not wired yet (text-only for now)
 
 ## Command Behavior
 

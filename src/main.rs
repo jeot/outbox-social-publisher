@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -63,7 +64,7 @@ struct PublishLinkedinArgs {
     #[arg(long, default_value_t = false)]
     allow_duplicate: bool,
     #[arg(long, default_value_t = false)]
-    debug_payload: bool,
+    debug: bool,
     #[arg(long, default_value_t = false, conflicts_with = "no_signature")]
     add_signature: bool,
     #[arg(long, default_value_t = false, conflicts_with = "add_signature")]
@@ -84,6 +85,8 @@ struct PublishXArgs {
     allow_length: bool,
     #[arg(long, default_value_t = false)]
     force: bool,
+    #[arg(long, default_value_t = false)]
+    debug: bool,
     #[arg(long, default_value_t = false, conflicts_with = "no_signature")]
     add_signature: bool,
     #[arg(long, default_value_t = false, conflicts_with = "add_signature")]
@@ -143,6 +146,7 @@ struct FileConfig {
     timeouts: Option<TimeoutConfig>,
     signature: Option<SignatureConfigFile>,
     platform: Option<PlatformConfig>,
+    media: Option<MediaConfigFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +177,11 @@ struct PlatformEntryConfig {
     signature: Option<SignatureConfigFile>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MediaConfigFile {
+    lookup_paths: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone)]
 struct SignatureLayer {
     enabled: Option<bool>,
@@ -187,6 +196,7 @@ struct RuntimeConfig {
     global_signature: SignatureLayer,
     linkedin_signature: SignatureLayer,
     x_signature: SignatureLayer,
+    media_lookup_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,6 +236,18 @@ struct XTokenExchangeResponse {
     expires_in: Option<u64>,
     scope: Option<String>,
     refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkedinImageInitResponse {
+    value: LinkedinImageInitValue,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkedinImageInitValue {
+    #[serde(rename = "uploadUrl")]
+    upload_url: String,
+    image: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,14 +294,23 @@ struct ErrorOutput {
     command: Option<String>,
 }
 
+#[derive(Debug)]
+struct ParsedPostInput {
+    publish_text: String,
+    media_paths: Vec<PathBuf>,
+    file_sha256: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PublishLogEntry {
     platform: String,
     author_urn: String,
     file_path: String,
     fingerprint: String,
+    #[serde(default, alias = "content_sha256")]
+    file_sha256: String,
     #[serde(default)]
-    content_sha256: String,
+    text_sha256: String,
     #[serde(default)]
     post_id: Option<String>,
     #[serde(default)]
@@ -314,7 +345,7 @@ enum AppError {
         message: String,
         existing_post_id: Option<String>,
         existing_post_url: Option<String>,
-        content_sha256: String,
+        file_sha256: String,
         existing_published_at: String,
     },
 }
@@ -389,7 +420,7 @@ impl AppError {
                 message,
                 existing_post_id,
                 existing_post_url,
-                content_sha256,
+                file_sha256,
                 existing_published_at,
             } => ErrorOutput {
                 ok: false,
@@ -399,7 +430,7 @@ impl AppError {
                 api_error: Some(json!({
                     "existing_post_id": existing_post_id,
                     "existing_post_url": existing_post_url,
-                    "content_sha256": content_sha256,
+                    "file_sha256": file_sha256,
                     "existing_published_at": existing_published_at
                 })),
                 retryable: false,
@@ -573,6 +604,7 @@ fn load_config() -> RuntimeConfig {
             enabled: None,
             text: None,
         },
+        media_lookup_paths: Vec::new(),
     };
 
     let Ok(raw) = fs::read_to_string("config.toml") else {
@@ -617,6 +649,12 @@ fn load_config() -> RuntimeConfig {
             .and_then(|p| p.x.as_ref())
             .and_then(|p| p.signature.as_ref()),
     );
+    let media_lookup_paths = file_config
+        .media
+        .as_ref()
+        .and_then(|m| m.lookup_paths.as_ref())
+        .map(|items| items.iter().map(PathBuf::from).collect())
+        .unwrap_or_else(Vec::new);
 
     RuntimeConfig {
         pretty_json,
@@ -625,6 +663,7 @@ fn load_config() -> RuntimeConfig {
         global_signature,
         linkedin_signature,
         x_signature,
+        media_lookup_paths,
     }
 }
 
@@ -1453,18 +1492,8 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         });
     }
 
-    let content = fs::read_to_string(&args.file).map_err(|err| AppError::Io {
-        message: format!("Failed to read content file: {err}"),
-    })?;
-
-    let mut commentary_raw = content.trim().to_string();
-    if commentary_raw.is_empty() {
-        return Err(AppError::Validation {
-            message: "Content file is empty after trimming whitespace.".to_string(),
-            suggestion: Some("Add post text to the file.".to_string()),
-            command: None,
-        });
-    }
+    let parsed = parse_post_input(&args.file, config)?;
+    let mut commentary_raw = parsed.publish_text;
     let signature_override = signature_cli_override(args.add_signature, args.no_signature);
     let mut signature_applied = false;
     if let Some(signature) =
@@ -1476,9 +1505,12 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
     let commentary = escape_little_text_plain(&commentary_raw);
 
     let auth = load_linkedin_auth()?;
-    let content_sha256 = compute_content_sha256(content.as_bytes());
-    let fingerprint = compute_fingerprint("linkedin", &auth.author_urn, &commentary_raw);
-    let payload = json!({
+    let media_sha = compute_media_signature(&parsed.media_paths)?;
+    let fingerprint_source = combine_text_and_media_for_fingerprint(&commentary_raw, &media_sha);
+    let file_sha256 = parsed.file_sha256;
+    let text_sha256 = compute_content_sha256(commentary_raw.as_bytes());
+    let fingerprint = compute_fingerprint("linkedin", &auth.author_urn, &fingerprint_source);
+    let mut payload = json!({
         "author": auth.author_urn,
         "commentary": commentary,
         "visibility": "PUBLIC",
@@ -1491,26 +1523,51 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         "isReshareDisabledByAuthor": false
     });
 
-    if args.debug_payload {
-        return Ok(json!({
-            "ok": true,
-            "platform": "linkedin",
-            "mode": "debug_payload",
-            "commentary_raw": commentary_raw,
-            "commentary_escaped": commentary,
-            "payload": payload,
-            "fingerprint": fingerprint,
-            "content_sha256": content_sha256
-        }));
-    }
-
     maybe_block_duplicate(
         "linkedin",
         &auth.author_urn,
         &fingerprint,
-        &content_sha256,
+        &file_sha256,
         args.allow_duplicate,
     )?;
+
+    if args.debug {
+        let payload_preview = if parsed.media_paths.is_empty() {
+            payload.clone()
+        } else if parsed.media_paths.len() == 1 {
+            let mut preview = payload.clone();
+            preview
+                .as_object_mut()
+                .expect("payload object")
+                .insert(
+                    "content".to_string(),
+                    json!({
+                        "media": {
+                            "id": "<resolved-via-linkedin-upload>"
+                        }
+                    }),
+                );
+            preview
+        } else {
+            payload.clone()
+        };
+
+        return Ok(json!({
+            "ok": true,
+            "platform": "linkedin",
+            "mode": "debug",
+            "would_publish": true,
+            "signature_applied": signature_applied,
+            "media_count": parsed.media_paths.len(),
+            "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "commentary_raw": commentary_raw,
+            "commentary_escaped": commentary,
+            "payload": payload_preview,
+            "fingerprint": fingerprint,
+            "file_sha256": file_sha256,
+            "text_sha256": text_sha256
+        }));
+    }
 
     let request_timeout = args
         .timeout_seconds
@@ -1553,8 +1610,44 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
         HeaderValue::from_static("2.0.0"),
     );
 
-    let mut response = client
-        .post("https://api.linkedin.com/rest/posts")
+    let response = client
+        .post("https://api.linkedin.com/rest/posts");
+
+    let mut media_urns: Vec<String> = Vec::new();
+    if !parsed.media_paths.is_empty() {
+        if parsed.media_paths.len() > 1 {
+            return Err(AppError::Validation {
+                message: format!(
+                    "LinkedIn multi-image publish is not implemented yet ({} images found).",
+                    parsed.media_paths.len()
+                ),
+                suggestion: Some("Keep one image for now; MultiImage API support can be added next.".to_string()),
+                command: None,
+            });
+        }
+        let image_urn = linkedin_upload_image(
+            &client,
+            &auth.access_token,
+            &auth.version,
+            &auth.author_urn,
+            &parsed.media_paths[0],
+        )
+        .await?;
+        media_urns.push(image_urn.clone());
+        payload
+            .as_object_mut()
+            .expect("payload object")
+            .insert(
+                "content".to_string(),
+                json!({
+                    "media": {
+                        "id": image_urn
+                    }
+                }),
+            );
+    }
+
+    let mut response = response
         .headers(headers.clone())
         .json(&payload)
         .send()
@@ -1644,15 +1737,18 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
     if let Some(obj) = value.as_object_mut() {
         obj.insert("token_refreshed".to_string(), json!(token_refreshed));
         obj.insert("signature_applied".to_string(), json!(signature_applied));
+        obj.insert("media_count".to_string(), json!(parsed.media_paths.len()));
+        obj.insert("media_urns".to_string(), json!(media_urns));
     }
-    attach_publish_metadata(&mut value, &fingerprint, &content_sha256, true);
+    attach_publish_metadata(&mut value, &fingerprint, &file_sha256, &text_sha256, true);
 
     let log_entry = PublishLogEntry {
         platform: "linkedin".to_string(),
         author_urn: auth.author_urn,
         file_path: args.file.display().to_string(),
         fingerprint,
-        content_sha256,
+        file_sha256,
+        text_sha256,
         post_id,
         post_url,
         request_id,
@@ -1672,17 +1768,8 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
         });
     }
 
-    let content = fs::read_to_string(&args.file).map_err(|err| AppError::Io {
-        message: format!("Failed to read content file: {err}"),
-    })?;
-    let mut text = content.trim().to_string();
-    if text.is_empty() {
-        return Err(AppError::Validation {
-            message: "Content file is empty after trimming whitespace.".to_string(),
-            suggestion: Some("Add post text to the file.".to_string()),
-            command: None,
-        });
-    }
+    let parsed = parse_post_input(&args.file, config)?;
+    let mut text = parsed.publish_text;
     let signature_override = signature_cli_override(args.add_signature, args.no_signature);
     let mut signature_applied = false;
     if let Some(signature) =
@@ -1690,6 +1777,19 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     {
         text.push_str(&signature);
         signature_applied = true;
+    }
+    if !parsed.media_paths.is_empty() {
+        return Err(AppError::Validation {
+            message: format!(
+                "X media publish is not implemented yet ({} images found).",
+                parsed.media_paths.len()
+            ),
+            suggestion: Some(
+                "Remove image embeds for X publish for now, or publish to LinkedIn where single-image upload is supported."
+                    .to_string(),
+            ),
+            command: None,
+        });
     }
     let bypass_duplicate = args.force || args.allow_duplicate;
     let bypass_cashtag = args.force || args.allow_cashtag;
@@ -1701,9 +1801,37 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
 
     let auth = load_x_auth()?;
     let author_key = x_author_key();
-    let content_sha256 = compute_content_sha256(content.as_bytes());
-    let fingerprint = compute_fingerprint("x", &author_key, &text);
-    maybe_block_duplicate("x", &author_key, &fingerprint, &content_sha256, bypass_duplicate)?;
+    let media_sha = compute_media_signature(&parsed.media_paths)?;
+    let fingerprint_source = combine_text_and_media_for_fingerprint(&text, &media_sha);
+    let file_sha256 = parsed.file_sha256;
+    let text_sha256 = compute_content_sha256(text.as_bytes());
+    let fingerprint = compute_fingerprint("x", &author_key, &fingerprint_source);
+    maybe_block_duplicate("x", &author_key, &fingerprint, &file_sha256, bypass_duplicate)?;
+
+    if args.debug {
+        return Ok(json!({
+            "ok": true,
+            "platform": "x",
+            "mode": "debug",
+            "would_publish": true,
+            "signature_applied": signature_applied,
+            "media_count": parsed.media_paths.len(),
+            "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "text": text,
+            "payload": {
+                "text": text
+            },
+            "fingerprint": fingerprint,
+            "file_sha256": file_sha256,
+            "text_sha256": text_sha256,
+            "duplicate_guard": if bypass_duplicate { "bypassed" } else { "checked" },
+            "local_preflight": {
+                "weighted_length": weighted_len,
+                "cashtag_count": cashtag_count
+            },
+            "auth_present": !auth.access_token.trim().is_empty()
+        }));
+    }
 
     let request_timeout = args
         .timeout_seconds
@@ -1815,7 +1943,13 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     let mut value = serde_json::to_value(output).map_err(|err| AppError::Io {
         message: format!("Failed to serialize success output: {err}"),
     })?;
-    attach_publish_metadata(&mut value, &fingerprint, &content_sha256, !bypass_duplicate);
+    attach_publish_metadata(
+        &mut value,
+        &fingerprint,
+        &file_sha256,
+        &text_sha256,
+        !bypass_duplicate,
+    );
     if let Some(obj) = value.as_object_mut() {
         obj.insert("signature_applied".to_string(), json!(signature_applied));
     }
@@ -1830,7 +1964,8 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
         author_urn: author_key,
         file_path: args.file.display().to_string(),
         fingerprint,
-        content_sha256,
+        file_sha256,
+        text_sha256,
         post_id,
         post_url,
         request_id,
@@ -2072,6 +2207,183 @@ fn env_non_empty(key: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+fn parse_post_input(file_path: &PathBuf, config: &RuntimeConfig) -> Result<ParsedPostInput, AppError> {
+    let content = fs::read_to_string(file_path).map_err(|err| AppError::Io {
+        message: format!("Failed to read content file: {err}"),
+    })?;
+
+    let media_refs = extract_obsidian_embeds(&content);
+    let media_paths = resolve_media_paths(file_path, &media_refs, config)?;
+
+    let publish_section = extract_publish_section_after_last_separator(&content);
+    let publish_text_without_embeds = remove_obsidian_embed_placeholders(&publish_section);
+    let publish_text = trim_outer_empty_lines(&publish_text_without_embeds);
+    if publish_text.is_empty() {
+        return Err(AppError::Validation {
+            message: "Post text is empty after removing metadata and image placeholders.".to_string(),
+            suggestion: Some("Add publishable text after the separator (---).".to_string()),
+            command: None,
+        });
+    }
+
+    Ok(ParsedPostInput {
+        publish_text,
+        media_paths,
+        file_sha256: compute_content_sha256(content.as_bytes()),
+    })
+}
+
+fn extract_publish_section_after_last_separator(raw: &str) -> String {
+    let mut last_sep_end = None;
+    let mut cursor = 0usize;
+    for line in raw.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
+        if trimmed == "---" {
+            last_sep_end = Some(cursor + line.len());
+        }
+        cursor += line.len();
+    }
+    match last_sep_end {
+        Some(idx) => raw[idx..].to_string(),
+        None => raw.to_string(),
+    }
+}
+
+fn trim_outer_empty_lines(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+fn extract_obsidian_embeds(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while let Some(open_rel) = raw[start..].find("![[") {
+        let open = start + open_rel + 3;
+        if let Some(close_rel) = raw[open..].find("]]") {
+            let close = open + close_rel;
+            let inner = raw[open..close].trim();
+            if !inner.is_empty() {
+                let cleaned = inner
+                    .split('|')
+                    .next()
+                    .unwrap_or(inner)
+                    .split('#')
+                    .next()
+                    .unwrap_or(inner)
+                    .trim();
+                if !cleaned.is_empty() {
+                    out.push(cleaned.to_string());
+                }
+            }
+            start = close + 2;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn remove_obsidian_embed_placeholders(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut start = 0usize;
+    while let Some(open_rel) = raw[start..].find("![[") {
+        let open = start + open_rel;
+        out.push_str(&raw[start..open]);
+        let content_start = open + 3;
+        if let Some(close_rel) = raw[content_start..].find("]]") {
+            let close = content_start + close_rel + 2;
+            start = close;
+        } else {
+            out.push_str(&raw[open..]);
+            start = raw.len();
+            break;
+        }
+    }
+    if start < raw.len() {
+        out.push_str(&raw[start..]);
+    }
+    out
+}
+
+fn resolve_media_paths(
+    note_path: &PathBuf,
+    refs: &[String],
+    config: &RuntimeConfig,
+) -> Result<Vec<PathBuf>, AppError> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    let note_dir = note_path.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+
+    for media_ref in refs {
+        let ref_path = PathBuf::from(media_ref);
+        let ext = ref_path
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext != "png" && ext != "jpg" && ext != "jpeg" {
+            return Err(AppError::Validation {
+                message: format!(
+                    "Unsupported media extension for '{}'. Allowed: .png, .jpg, .jpeg",
+                    media_ref
+                ),
+                suggestion: Some("Convert image to allowed extension and retry.".to_string()),
+                command: None,
+            });
+        }
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if ref_path.is_absolute() {
+            candidates.push(ref_path.clone());
+        } else {
+            candidates.push(note_dir.join(&ref_path));
+            for base in &config.media_lookup_paths {
+                candidates.push(base.join(&ref_path));
+            }
+        }
+
+        let found = candidates.into_iter().find(|p| p.is_file());
+        let Some(path) = found else {
+            return Err(AppError::Validation {
+                message: format!("Referenced media file not found: '{}'", media_ref),
+                suggestion: Some(
+                    "Place media in note folder or configure [media].lookup_paths in config.toml."
+                        .to_string(),
+                ),
+                command: None,
+            });
+        };
+
+        let canon = fs::canonicalize(&path).unwrap_or(path.clone());
+        let key = canon.to_string_lossy().to_string();
+        if seen.insert(key) {
+            resolved.push(canon);
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn compute_media_signature(media_paths: &[PathBuf]) -> Result<String, AppError> {
+    if media_paths.is_empty() {
+        return Ok(String::new());
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for path in media_paths {
+        let bytes = fs::read(path).map_err(|err| AppError::Io {
+            message: format!("Failed to read media file '{}': {err}", path.display()),
+        })?;
+        parts.push(compute_content_sha256(&bytes));
+    }
+    Ok(parts.join(","))
+}
+
+fn combine_text_and_media_for_fingerprint(text: &str, media_signature: &str) -> String {
+    if media_signature.is_empty() {
+        return text.to_string();
+    }
+    format!("{text}\n[media_sha256:{media_signature}]")
+}
+
 #[derive(Copy, Clone)]
 enum PublishPlatformKind {
     Linkedin,
@@ -2162,7 +2474,7 @@ fn maybe_block_duplicate(
     platform: &str,
     author_key: &str,
     fingerprint: &str,
-    content_sha256: &str,
+    file_sha256: &str,
     allow_duplicate: bool,
 ) -> Result<(), AppError> {
     if allow_duplicate {
@@ -2173,7 +2485,7 @@ fn maybe_block_duplicate(
             message: "Duplicate publish blocked for same platform/author/content.".to_string(),
             existing_post_id: existing.post_id,
             existing_post_url: existing.post_url,
-            content_sha256: content_sha256.to_string(),
+            file_sha256: file_sha256.to_string(),
             existing_published_at: existing.published_at,
         });
     }
@@ -2183,7 +2495,8 @@ fn maybe_block_duplicate(
 fn attach_publish_metadata(
     value: &mut Value,
     fingerprint: &str,
-    content_sha256: &str,
+    file_sha256: &str,
+    text_sha256: &str,
     duplicate_checked: bool,
 ) {
     if let Some(obj) = value.as_object_mut() {
@@ -2192,7 +2505,8 @@ fn attach_publish_metadata(
             json!(if duplicate_checked { "checked" } else { "bypassed" }),
         );
         obj.insert("fingerprint".to_string(), json!(fingerprint));
-        obj.insert("content_sha256".to_string(), json!(content_sha256));
+        obj.insert("file_sha256".to_string(), json!(file_sha256));
+        obj.insert("text_sha256".to_string(), json!(text_sha256));
     }
 }
 
@@ -2359,6 +2673,107 @@ async fn refresh_linkedin_access_token(
     }
 
     Ok(body)
+}
+
+async fn linkedin_upload_image(
+    client: &reqwest::Client,
+    access_token: &str,
+    linkedin_version: &str,
+    owner_urn: &str,
+    image_path: &PathBuf,
+) -> Result<String, AppError> {
+    let init_response = client
+        .post("https://api.linkedin.com/rest/images?action=initializeUpload")
+        .header(AUTHORIZATION, format!("Bearer {}", access_token))
+        .header(CONTENT_TYPE, "application/json")
+        .header("LinkedIn-Version", linkedin_version)
+        .header("X-Restli-Protocol-Version", "2.0.0")
+        .json(&json!({
+            "initializeUploadRequest": {
+                "owner": owner_urn
+            }
+        }))
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("LinkedIn image initializeUpload request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let init_status = init_response.status();
+    if !init_status.is_success() {
+        let maybe_json = init_response.json::<Value>().await.ok();
+        return Err(AppError::Http {
+            message: format!("LinkedIn image initializeUpload returned {}", init_status.as_u16()),
+            status: Some(init_status.as_u16()),
+            api_error: maybe_json,
+            retryable: init_status.is_server_error() || init_status.as_u16() == 429,
+        });
+    }
+
+    let init_body = init_response
+        .json::<LinkedinImageInitResponse>()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to parse LinkedIn image initializeUpload response: {err}"),
+            status: Some(200),
+            api_error: None,
+            retryable: false,
+        })?;
+
+    let image_bytes = fs::read(image_path).map_err(|err| AppError::Io {
+        message: format!("Failed to read image '{}': {err}", image_path.display()),
+    })?;
+    let content_type = media_content_type(image_path)?;
+
+    let upload_response = client
+        .put(&init_body.value.upload_url)
+        .header(AUTHORIZATION, format!("Bearer {}", access_token))
+        .header(CONTENT_TYPE, content_type)
+        .body(image_bytes)
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("LinkedIn image upload request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let upload_status = upload_response.status();
+    if !upload_status.is_success() {
+        let maybe_json = upload_response.json::<Value>().await.ok();
+        return Err(AppError::Http {
+            message: format!("LinkedIn image upload returned {}", upload_status.as_u16()),
+            status: Some(upload_status.as_u16()),
+            api_error: maybe_json,
+            retryable: upload_status.is_server_error() || upload_status.as_u16() == 429,
+        });
+    }
+
+    Ok(init_body.value.image)
+}
+
+fn media_content_type(image_path: &PathBuf) -> Result<&'static str, AppError> {
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Ok("image/png"),
+        "jpg" | "jpeg" => Ok("image/jpeg"),
+        _ => Err(AppError::Validation {
+            message: format!(
+                "Unsupported media extension for '{}'. Allowed: .png, .jpg, .jpeg",
+                image_path.display()
+            ),
+            suggestion: Some("Use PNG or JPEG image files.".to_string()),
+            command: None,
+        }),
+    }
 }
 
 fn generate_state(length: usize) -> String {

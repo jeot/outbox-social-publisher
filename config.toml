@@ -17,3 +17,6 @@ enabled = false
 [platform.x.signature]
 enabled = true
 text = "\n\n[Sent from outbox, by Shamim.]"
+
+[media]
+lookup_paths = ["/Users/shk/work/awesome/Files"]
