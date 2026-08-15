@@ -15,16 +15,26 @@
 - [x] Implement `outbox publish linkedin --file <path>` command.
 - [x] Implement LinkedIn OAuth setup flow for a single personal account.
 - [x] Add non-interactive auth commands: `guide`, `login`, `exchange --code --state`, `whoami`.
+- [x] Add token tooling commands: `token-status`, `token-refresh`.
 - [x] Store OAuth tokens in `.env` (local, not committed).
 - [x] Add automatic access-token refresh using refresh token.
 - [x] Implement LinkedIn "publish text post as-is" adapter.
+- [x] Escape LinkedIn little-text reserved characters before publish.
+- [x] Add `--debug-payload` mode to inspect exact outgoing payload.
 - [x] Add duplicate-publish guard for immediate retries.
 - [x] Add deterministic idempotency key generation for publish requests.
 - [x] Return API error details transparently in JSON output.
 - [x] Write setup guide for another user on macOS, Linux, and Windows.
-- [ ] Build and test release binaries for macOS, Linux, and Windows.
 
-## Phase 2 - Scheduling and Background Worker (LinkedIn)
+## Phase 2 - X Platform Support
+
+- [x] Implement X platform adapter behind shared publisher interface.
+- [x] Add X authentication setup and token storage.
+- [x] Add `outbox publish x --file <path>` command path.
+- [ ] Add X character-length validation and thread mode decision.
+- [ ] Integrate X into scheduler flow and retry/idempotency behavior.
+
+## Phase 3 - Scheduling and Background Worker (LinkedIn)
 
 - [ ] Define local schedule/state file format and job states (`ready`, `scheduled`, `publishing`, `published`, `failed`).
 - [ ] Add `outbox schedule add` and `outbox schedule list` commands.
@@ -37,14 +47,6 @@
 - [ ] Add volume checkpoint for persistence strategy:
 - [ ] Stay file-first for early scale.
 - [ ] Define threshold and migration trigger to SQLite (for example around thousands of published items and growing query latency).
-
-## Phase 3 - X Platform Support
-
-- [ ] Implement X platform adapter behind shared publisher interface.
-- [ ] Add X authentication setup and token storage.
-- [ ] Add `outbox publish x --file <path>` command path.
-- [ ] Add X character-length validation and thread mode decision.
-- [ ] Integrate X into scheduler flow and retry/idempotency behavior.
 
 ## Phase 4 - Substack Support
 
@@ -76,3 +78,8 @@
 - [ ] Build TypeScript dashboard for content list, schedule view, and publish actions.
 - [ ] Add sync view for local file status and job status.
 - [ ] Keep dashboard as interface layer; keep publish logic in Rust core.
+
+## Phase 8 - Public Distribution (Optional, End-Stage)
+
+- [ ] Build and test release binaries for macOS, Linux, and Windows.
+- [ ] Add release packaging notes for external developers (checksums, naming, changelog).

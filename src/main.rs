@@ -1,9 +1,17 @@
 use std::env;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::{Query, State};
+use axum::response::Html;
+use axum::routing::get;
+use axum::Router;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use rand::Rng;
@@ -11,12 +19,15 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::sync::{oneshot, Mutex};
+use url::Url;
 use urlencoding::encode;
 
 const DEFAULT_LINKEDIN_VERSION: &str = "202601";
 const OAUTH_STATE_PATH: &str = ".outbox/linkedin_oauth_state";
 const PUBLISH_LOG_PATH: &str = ".outbox/publish-log.jsonl";
 const ENV_PATH: &str = ".env";
+const DEFAULT_X_SCOPES: &str = "tweet.write users.read offline.access";
 
 #[derive(Debug, Parser)]
 #[command(name = "outbox")]
@@ -41,6 +52,7 @@ struct PublishArgs {
 #[derive(Debug, Subcommand)]
 enum PublishPlatform {
     Linkedin(PublishLinkedinArgs),
+    X(PublishXArgs),
 }
 
 #[derive(Debug, Args)]
@@ -56,6 +68,14 @@ struct PublishLinkedinArgs {
 }
 
 #[derive(Debug, Args)]
+struct PublishXArgs {
+    #[arg(long)]
+    file: PathBuf,
+    #[arg(long)]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Args)]
 struct AuthArgs {
     #[command(subcommand)]
     platform: AuthPlatform,
@@ -64,6 +84,7 @@ struct AuthArgs {
 #[derive(Debug, Subcommand)]
 enum AuthPlatform {
     Linkedin(AuthLinkedinArgs),
+    X(AuthXArgs),
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +101,17 @@ enum AuthLinkedinCommand {
     Whoami,
     TokenStatus,
     TokenRefresh,
+}
+
+#[derive(Debug, Args)]
+struct AuthXArgs {
+    #[command(subcommand)]
+    command: AuthXCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthXCommand {
+    Login,
 }
 
 #[derive(Debug, Args)]
@@ -148,6 +180,31 @@ struct TokenExchangeResponse {
 struct UserInfoResponse {
     sub: String,
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XTokenExchangeResponse {
+    access_token: String,
+    token_type: Option<String>,
+    expires_in: Option<u64>,
+    scope: Option<String>,
+    refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Debug)]
+struct XAuthResult {
+    access_token_expires_in: Option<u64>,
+    refresh_token_saved: bool,
+    scope: Option<String>,
+    token_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -308,6 +365,23 @@ struct LinkedinAuth {
     version: String,
 }
 
+#[derive(Debug)]
+struct XAuth {
+    access_token: String,
+}
+
+#[derive(Clone)]
+struct XOAuthCallbackState {
+    expected_state: String,
+    code_verifier: String,
+    client_id: String,
+    client_secret: Option<String>,
+    redirect_uri: String,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    result_tx: Arc<Mutex<Option<oneshot::Sender<Result<XAuthResult, AppError>>>>>,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let _ = dotenvy::from_filename_override(".env");
@@ -317,6 +391,7 @@ async fn main() -> ExitCode {
     let result: Result<Value, AppError> = match cli.command {
         Commands::Publish(publish) => match publish.platform {
             PublishPlatform::Linkedin(args) => publish_linkedin(args, &config).await,
+            PublishPlatform::X(args) => publish_x(args, &config).await,
         },
         Commands::Auth(auth) => match auth.platform {
             AuthPlatform::Linkedin(args) => match args.command {
@@ -326,6 +401,9 @@ async fn main() -> ExitCode {
                 AuthLinkedinCommand::Whoami => resolve_linkedin_author_urn(&config).await,
                 AuthLinkedinCommand::TokenStatus => show_linkedin_token_status(),
                 AuthLinkedinCommand::TokenRefresh => run_linkedin_token_refresh(&config).await,
+            },
+            AuthPlatform::X(args) => match args.command {
+                AuthXCommand::Login => start_x_login(&config).await,
             },
         },
     };
@@ -423,6 +501,289 @@ fn show_linkedin_auth_guide() -> Result<Value, AppError> {
         "mode": "auth_guide",
         "next": next
     }))
+}
+
+async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
+    let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
+        message: "X_CLIENT_ID is missing.".to_string(),
+        suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
+        command: Some("outbox auth x login".to_string()),
+    })?;
+    let redirect_uri = env_non_empty("X_REDIRECT_URI").ok_or(AppError::MissingAuth {
+        message: "X_REDIRECT_URI is missing.".to_string(),
+        suggestion: Some("Set X_REDIRECT_URI in .env and match it in your X app callback URL settings.".to_string()),
+        command: Some("outbox auth x login".to_string()),
+    })?;
+    let scopes = env_non_empty("X_SCOPES").unwrap_or_else(|| DEFAULT_X_SCOPES.to_string());
+    let client_secret = env_non_empty("X_CLIENT_SECRET");
+
+    let redirect = Url::parse(&redirect_uri).map_err(|err| AppError::Validation {
+        message: format!("Invalid X_REDIRECT_URI: {err}"),
+        suggestion: Some("Use a full URL like http://127.0.0.1:8789/callback".to_string()),
+        command: Some("outbox auth x login".to_string()),
+    })?;
+    let host = redirect.host_str().ok_or(AppError::Validation {
+        message: "X_REDIRECT_URI must include a host.".to_string(),
+        suggestion: Some("Use localhost or 127.0.0.1 callback URL.".to_string()),
+        command: Some("outbox auth x login".to_string()),
+    })?;
+    let port = redirect.port().unwrap_or(80);
+    let path = redirect.path().to_string();
+
+    let state = generate_state(32);
+    let code_verifier = generate_code_verifier(64);
+    let code_challenge = pkce_code_challenge(&code_verifier);
+
+    let auth_url = format!(
+        "https://twitter.com/i/oauth2/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        encode(&client_id),
+        encode(&redirect_uri),
+        encode(&scopes),
+        encode(&state),
+        encode(&code_challenge)
+    );
+
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .map_err(|err| AppError::Validation {
+            message: format!("Invalid callback host/port from X_REDIRECT_URI: {err}"),
+            suggestion: Some("Use a valid localhost callback URL.".to_string()),
+            command: Some("outbox auth x login".to_string()),
+        })?;
+
+    let (result_tx, result_rx) = oneshot::channel::<Result<XAuthResult, AppError>>();
+    let state_obj = XOAuthCallbackState {
+        expected_state: state,
+        code_verifier,
+        client_id,
+        client_secret,
+        redirect_uri,
+        connect_timeout: config.connect_timeout,
+        request_timeout: config.request_timeout,
+        result_tx: Arc::new(Mutex::new(Some(result_tx))),
+    };
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to bind local callback server on {addr}: {err}"),
+        })?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let app = Router::new()
+        .route("/", get(x_oauth_callback_handler))
+        .route("/*rest", get(x_oauth_callback_handler))
+        .with_state(Arc::new(state_obj.clone()));
+
+    let expected_path = if path.is_empty() { "/".to_string() } else { path };
+    println!("X auth: local callback server listening on http://{addr}{expected_path}");
+    println!("X auth: opening browser for authorization...");
+    println!("X auth: if browser does not open, use this URL:\n{auth_url}");
+    println!("X auth: waiting for callback (Ctrl-C to cancel)...");
+
+    let server_task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+
+    let browser_opened = webbrowser::open(&auth_url).ok().map(|_| true);
+
+    let result = match tokio::time::timeout(Duration::from_secs(300), result_rx).await {
+        Ok(Ok(inner)) => inner,
+        Ok(Err(_)) => Err(AppError::Io {
+            message: "Auth callback channel closed unexpectedly.".to_string(),
+        }),
+        Err(_) => Err(AppError::Validation {
+            message: "Timed out waiting for X OAuth callback.".to_string(),
+            suggestion: Some("Retry auth and complete browser consent within 5 minutes.".to_string()),
+            command: Some("outbox auth x login".to_string()),
+        }),
+    };
+
+    let _ = shutdown_tx.send(());
+    let _ = server_task.await;
+
+    match result {
+        Ok(auth_result) => Ok(json!({
+            "ok": true,
+            "platform": "x",
+            "mode": "auth_x_login",
+            "browser_opened": browser_opened,
+            "access_token_saved": true,
+            "refresh_token_saved": auth_result.refresh_token_saved,
+            "access_token_expires_in": auth_result.access_token_expires_in,
+            "scope": auth_result.scope,
+            "token_type": auth_result.token_type,
+            "next": {
+                "message": "X auth completed. You can publish now.",
+                "command": "outbox publish x --file <path>"
+            }
+        })),
+        Err(err) => Err(err),
+    }
+}
+
+async fn x_oauth_callback_handler(
+    State(state): State<Arc<XOAuthCallbackState>>,
+    Query(query): Query<XCallbackQuery>,
+) -> Html<String> {
+    let result = process_x_callback(state.clone(), query).await;
+
+    let (title, message): (&str, String) = match &result {
+        Ok(_) => (
+            "X authorization successful",
+            "Access token saved successfully. You can close this tab and return to the terminal."
+                .to_string(),
+        ),
+        Err(err) => ("X authorization failed", err.to_output().message),
+    };
+
+    if let Some(tx) = state.result_tx.lock().await.take() {
+        let _ = tx.send(result);
+    }
+
+    Html(format!(
+        "<html><head><meta charset=\"utf-8\"><title>{title}</title></head><body><h2>{title}</h2><p>{message}</p></body></html>"
+    ))
+}
+
+async fn process_x_callback(
+    state: Arc<XOAuthCallbackState>,
+    query: XCallbackQuery,
+) -> Result<XAuthResult, AppError> {
+    if let Some(error) = query.error {
+        return Err(AppError::Validation {
+            message: format!(
+                "X OAuth returned error: {}{}",
+                error,
+                query
+                    .error_description
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
+            ),
+            suggestion: Some("Retry consent flow and ensure scopes are approved in X app settings.".to_string()),
+            command: Some("outbox auth x login".to_string()),
+        });
+    }
+
+    let code = query.code.ok_or(AppError::Validation {
+        message: "X callback did not include authorization code.".to_string(),
+        suggestion: Some("Retry auth flow and complete consent.".to_string()),
+        command: Some("outbox auth x login".to_string()),
+    })?;
+    let returned_state = query.state.ok_or(AppError::Validation {
+        message: "X callback did not include state.".to_string(),
+        suggestion: Some("Retry auth flow.".to_string()),
+        command: Some("outbox auth x login".to_string()),
+    })?;
+    if returned_state != state.expected_state {
+        return Err(AppError::Validation {
+            message: "X OAuth state mismatch.".to_string(),
+            suggestion: Some("Retry auth flow; ensure you use the latest auth URL.".to_string()),
+            command: Some("outbox auth x login".to_string()),
+        });
+    }
+
+    exchange_x_code_for_token(
+        code,
+        &state.client_id,
+        state.client_secret.as_deref(),
+        &state.redirect_uri,
+        &state.code_verifier,
+        state.connect_timeout,
+        state.request_timeout,
+    )
+    .await
+}
+
+async fn exchange_x_code_for_token(
+    code: String,
+    client_id: &str,
+    client_secret: Option<&str>,
+    redirect_uri: &str,
+    code_verifier: &str,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<XAuthResult, AppError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to build HTTP client: {err}"),
+            status: None,
+            api_error: None,
+            retryable: false,
+        })?;
+
+    let mut params = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("code_verifier", code_verifier.to_string()),
+        ("client_id", client_id.to_string()),
+    ];
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret.to_string()));
+    }
+
+    let response = client
+        .post("https://api.x.com/2/oauth2/token")
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("X token exchange request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let maybe_json = response.json::<Value>().await.ok();
+        return Err(AppError::Http {
+            message: format!("X token exchange returned {}", status.as_u16()),
+            status: Some(status.as_u16()),
+            api_error: maybe_json,
+            retryable: status.is_server_error() || status.as_u16() == 429,
+        });
+    }
+
+    let body = response
+        .json::<XTokenExchangeResponse>()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to parse X token response: {err}"),
+            status: Some(200),
+            api_error: None,
+            retryable: false,
+        })?;
+
+    upsert_env_value("X_ACCESS_TOKEN", &body.access_token)?;
+    if let Some(refresh_token) = body.refresh_token.clone() {
+        upsert_env_value("X_REFRESH_TOKEN", &refresh_token)?;
+    }
+    if let Some(expires_in) = body.expires_in {
+        upsert_env_value("X_ACCESS_TOKEN_EXPIRES_IN", &expires_in.to_string())?;
+    }
+    if let Some(scope) = body.scope.clone() {
+        upsert_env_value("X_SCOPE", &scope)?;
+    }
+    if let Some(token_type) = body.token_type.clone() {
+        upsert_env_value("X_TOKEN_TYPE", &token_type)?;
+    }
+
+    Ok(XAuthResult {
+        access_token_expires_in: body.expires_in,
+        refresh_token_saved: body.refresh_token.is_some(),
+        scope: body.scope,
+        token_type: body.token_type,
+    })
 }
 
 fn start_linkedin_login(args: AuthLinkedinLoginArgs) -> Result<Value, AppError> {
@@ -905,6 +1266,106 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
     Ok(value)
 }
 
+async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    if !args.file.exists() {
+        return Err(AppError::Validation {
+            message: format!("Content file does not exist: {}", args.file.display()),
+            suggestion: Some("Check the file path and run the same command again.".to_string()),
+            command: None,
+        });
+    }
+
+    let content = fs::read_to_string(&args.file).map_err(|err| AppError::Io {
+        message: format!("Failed to read content file: {err}"),
+    })?;
+    let text = content.trim().to_string();
+    if text.is_empty() {
+        return Err(AppError::Validation {
+            message: "Content file is empty after trimming whitespace.".to_string(),
+            suggestion: Some("Add post text to the file.".to_string()),
+            command: None,
+        });
+    }
+
+    let auth = load_x_auth()?;
+    let request_timeout = args
+        .timeout_seconds
+        .map(Duration::from_secs)
+        .unwrap_or(config.request_timeout);
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(config.connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to build HTTP client: {err}"),
+            status: None,
+            api_error: None,
+            retryable: false,
+        })?;
+
+    let response = client
+        .post("https://api.x.com/2/tweets")
+        .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&json!({ "text": text }))
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("X request failed: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+
+    if !status.is_success() {
+        let maybe_json = response.json::<Value>().await.ok();
+        if status.as_u16() == 401 {
+            return Err(AppError::MissingAuth {
+                message: "X access token is invalid or expired.".to_string(),
+                suggestion: Some("Update X_ACCESS_TOKEN in .env and retry publish.".to_string()),
+                command: Some("outbox publish x --file <path>".to_string()),
+            });
+        }
+        return Err(AppError::Http {
+            message: format!("X API returned {}", status.as_u16()),
+            status: Some(status.as_u16()),
+            api_error: maybe_json,
+            retryable: status.is_server_error() || status.as_u16() == 429,
+        });
+    }
+
+    let body = response.json::<Value>().await.ok();
+    let post_id = body
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    let post_url = post_id
+        .as_ref()
+        .map(|id| format!("https://x.com/i/web/status/{id}"));
+
+    let output = SuccessOutput {
+        ok: true,
+        platform: "x",
+        post_id,
+        post_url,
+        request_id,
+        published_at: Utc::now().to_rfc3339(),
+    };
+    serde_json::to_value(output).map_err(|err| AppError::Io {
+        message: format!("Failed to serialize success output: {err}"),
+    })
+}
+
 fn load_linkedin_auth() -> Result<LinkedinAuth, AppError> {
     let access_token = env::var("LINKEDIN_ACCESS_TOKEN").map_err(|_| AppError::MissingAuth {
         message: "No LinkedIn access token found.".to_string(),
@@ -932,6 +1393,15 @@ fn load_linkedin_auth() -> Result<LinkedinAuth, AppError> {
         author_urn,
         version,
     })
+}
+
+fn load_x_auth() -> Result<XAuth, AppError> {
+    let access_token = env_non_empty("X_ACCESS_TOKEN").ok_or(AppError::MissingAuth {
+        message: "No X access token found.".to_string(),
+        suggestion: Some("Set X_ACCESS_TOKEN in .env from your X app user authorization.".to_string()),
+        command: Some("outbox publish x --file <path>".to_string()),
+    })?;
+    Ok(XAuth { access_token })
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -1117,6 +1587,25 @@ fn generate_state(length: usize) -> String {
             CHARSET[idx] as char
         })
         .collect()
+}
+
+fn generate_code_verifier(length: usize) -> String {
+    const CHARSET: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    let mut rng = rand::rng();
+    (0..length)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
+fn pkce_code_challenge(code_verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(code_verifier.as_bytes());
+    let digest = hasher.finalize();
+    URL_SAFE_NO_PAD.encode(digest)
 }
 
 fn save_oauth_state(state: &OAuthState) -> Result<(), AppError> {

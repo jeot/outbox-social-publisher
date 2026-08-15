@@ -3,6 +3,7 @@
 Local-first CLI for publishing content from files.
 
 Current status: LinkedIn text publishing MVP in progress.
+X text publishing (env-token path) is now available.
 
 ## Prerequisites
 
@@ -33,6 +34,7 @@ pretty_json = true
 
 ```bash
 cargo run -- publish linkedin --file ./your-post.md
+cargo run -- publish x --file ./your-post.md
 ```
 
 ## LinkedIn Developer App Setup
@@ -71,6 +73,50 @@ LINKEDIN_ACCESS_TOKEN_EXPIRES_IN=
 LINKEDIN_REFRESH_TOKEN_EXPIRES_IN=
 LINKEDIN_AUTHOR_URN=urn:li:person:
 LINKEDIN_API_VERSION=202607
+X_ACCESS_TOKEN=
+X_CLIENT_ID=
+X_CLIENT_SECRET=
+X_REDIRECT_URI=http://127.0.0.1:8789/callback
+X_SCOPES='tweet.write users.read offline.access'
+X_REFRESH_TOKEN=
+X_ACCESS_TOKEN_EXPIRES_IN=
+```
+
+## X Quick Start (Guided OAuth 2.0)
+
+1. Configure your X app OAuth 2.0 callback URL to exactly match `X_REDIRECT_URI`.
+2. Set `X_CLIENT_ID` (and optionally `X_CLIENT_SECRET`) in `.env`.
+3. Run guided login:
+
+```bash
+cargo run -- auth x login
+```
+
+Behavior:
+
+- starts localhost callback server
+- opens browser and prints auth URL
+- waits for callback (Ctrl-C cancels)
+- exchanges code for token and saves `.env`
+- shows success/failure in both browser and terminal
+
+4. Publish:
+
+```bash
+cargo run -- publish x --file ./post.md
+```
+
+Expected success JSON:
+
+```json
+{
+  "ok": true,
+  "platform": "x",
+  "post_id": "<tweet-id>",
+  "post_url": "https://x.com/i/web/status/<tweet-id>",
+  "request_id": "<x-request-id-or-null>",
+  "published_at": "2026-08-15T12:34:56Z"
+}
 ```
 
 ## Auth Commands (Non-Interactive)
