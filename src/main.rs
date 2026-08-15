@@ -1,6 +1,5 @@
 use std::env;
 use std::fs;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -346,6 +345,7 @@ enum AppError {
         existing_post_id: Option<String>,
         existing_post_url: Option<String>,
         file_sha256: String,
+        fingerprint: String,
         existing_published_at: String,
     },
 }
@@ -421,6 +421,7 @@ impl AppError {
                 existing_post_id,
                 existing_post_url,
                 file_sha256,
+                fingerprint,
                 existing_published_at,
             } => ErrorOutput {
                 ok: false,
@@ -431,6 +432,7 @@ impl AppError {
                     "existing_post_id": existing_post_id,
                     "existing_post_url": existing_post_url,
                     "file_sha256": file_sha256,
+                    "fingerprint": fingerprint,
                     "existing_published_at": existing_published_at
                 })),
                 retryable: false,
@@ -1549,7 +1551,39 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
                 );
             preview
         } else {
-            payload.clone()
+            if parsed.media_paths.len() > 20 {
+                return Err(AppError::Validation {
+                    message: format!(
+                        "LinkedIn multi-image supports at most 20 images; found {}.",
+                        parsed.media_paths.len()
+                    ),
+                    suggestion: Some("Reduce image count to 20 or fewer and retry.".to_string()),
+                    command: None,
+                });
+            }
+            let mut preview = payload.clone();
+            let images_preview: Vec<Value> = parsed
+                .media_paths
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    json!({
+                        "id": format!("<resolved-via-linkedin-upload-{}>", i + 1)
+                    })
+                })
+                .collect();
+            preview
+                .as_object_mut()
+                .expect("payload object")
+                .insert(
+                    "content".to_string(),
+                    json!({
+                        "multiImage": {
+                            "images": images_preview
+                        }
+                    }),
+                );
+            preview
         };
 
         return Ok(json!({
@@ -1615,36 +1649,52 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
 
     let mut media_urns: Vec<String> = Vec::new();
     if !parsed.media_paths.is_empty() {
-        if parsed.media_paths.len() > 1 {
+        if parsed.media_paths.len() > 20 {
             return Err(AppError::Validation {
                 message: format!(
-                    "LinkedIn multi-image publish is not implemented yet ({} images found).",
+                    "LinkedIn multi-image supports at most 20 images; found {}.",
                     parsed.media_paths.len()
                 ),
-                suggestion: Some("Keep one image for now; MultiImage API support can be added next.".to_string()),
+                suggestion: Some("Reduce image count to 20 or fewer and retry.".to_string()),
                 command: None,
             });
         }
-        let image_urn = linkedin_upload_image(
-            &client,
-            &auth.access_token,
-            &auth.version,
-            &auth.author_urn,
-            &parsed.media_paths[0],
-        )
-        .await?;
-        media_urns.push(image_urn.clone());
+        for path in &parsed.media_paths {
+            let image_urn = linkedin_upload_image(
+                &client,
+                &auth.access_token,
+                &auth.version,
+                &auth.author_urn,
+                path,
+            )
+            .await?;
+            media_urns.push(image_urn);
+        }
+        let content_value = if media_urns.len() == 1 {
+            json!({
+                "media": {
+                    "id": media_urns[0]
+                }
+            })
+        } else {
+            let images: Vec<Value> = media_urns
+                .iter()
+                .map(|id| {
+                    json!({
+                        "id": id
+                    })
+                })
+                .collect();
+            json!({
+                "multiImage": {
+                    "images": images
+                }
+            })
+        };
         payload
             .as_object_mut()
             .expect("payload object")
-            .insert(
-                "content".to_string(),
-                json!({
-                    "media": {
-                        "id": image_urn
-                    }
-                }),
-            );
+            .insert("content".to_string(), content_value);
     }
 
     let mut response = response
@@ -2310,7 +2360,6 @@ fn resolve_media_paths(
     config: &RuntimeConfig,
 ) -> Result<Vec<PathBuf>, AppError> {
     let mut resolved = Vec::new();
-    let mut seen = HashSet::new();
     let note_dir = note_path.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
 
     for media_ref in refs {
@@ -2354,10 +2403,7 @@ fn resolve_media_paths(
         };
 
         let canon = fs::canonicalize(&path).unwrap_or(path.clone());
-        let key = canon.to_string_lossy().to_string();
-        if seen.insert(key) {
-            resolved.push(canon);
-        }
+        resolved.push(canon);
     }
 
     Ok(resolved)
@@ -2486,6 +2532,7 @@ fn maybe_block_duplicate(
             existing_post_id: existing.post_id,
             existing_post_url: existing.post_url,
             file_sha256: file_sha256.to_string(),
+            fingerprint: fingerprint.to_string(),
             existing_published_at: existing.published_at,
         });
     }

@@ -508,7 +508,7 @@ If a referenced image is missing or unsupported, publish is blocked with a valid
 Current platform status:
 
 - LinkedIn: single-image upload supported (if one image embed is found)
-- LinkedIn: multiple images currently blocked (MultiImage API not wired yet)
+- LinkedIn: multi-image upload supported (2-20 images, using MultiImage content)
 - X: image publish not wired yet (text-only for now)
 
 ## Command Behavior

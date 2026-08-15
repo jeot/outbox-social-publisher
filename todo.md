@@ -49,7 +49,7 @@
 - [x] Resolve media from note folder first, then `config.toml` media lookup paths.
 - [x] Validate media extension (`.png`, `.jpg`, `.jpeg`) and block on invalid/missing files.
 - [x] Add LinkedIn single-image upload flow (`rest/images initializeUpload` + upload + `rest/posts` media content).
-- [ ] Add LinkedIn multi-image publish support (MultiImage API).
+- [x] Add LinkedIn multi-image publish support (MultiImage API, 2-20 images).
 - [ ] Add X image upload/publish support.
 
 ## Phase 4 - Scheduling and Background Worker (LinkedIn)
