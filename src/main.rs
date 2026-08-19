@@ -23,14 +23,15 @@ use url::Url;
 use urlencoding::encode;
 
 const DEFAULT_LINKEDIN_VERSION: &str = "202601";
-const OAUTH_STATE_PATH: &str = ".outbox/linkedin_oauth_state";
-const X_OAUTH_STATE_PATH: &str = ".outbox/x_oauth_state";
-const PUBLISH_LOG_PATH: &str = ".outbox/publish-log.jsonl";
+const DATA_DIR: &str = ".publo";
+const OAUTH_STATE_PATH: &str = ".publo/linkedin_oauth_state";
+const X_OAUTH_STATE_PATH: &str = ".publo/x_oauth_state";
+const PUBLISH_LOG_PATH: &str = ".publo/publish-log.jsonl";
 const ENV_PATH: &str = ".env";
 const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read media.write offline.access";
 
 #[derive(Debug, Parser)]
-#[command(name = "outbox")]
+#[command(name = "publo")]
 #[command(about = "Local-first publishing CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -726,12 +727,12 @@ fn show_linkedin_auth_guide() -> Result<Value, AppError> {
         json!({
             "message": "LinkedIn app settings are incomplete.",
             "required_env": ["LINKEDIN_CLIENT_ID", "LINKEDIN_REDIRECT_URI", "LINKEDIN_CLIENT_SECRET"],
-            "command": "outbox auth linkedin guide"
+            "command": "publo auth linkedin guide"
         })
     } else if access_token.is_none() {
         json!({
             "message": "No LinkedIn access token found. Start OAuth login.",
-            "command": "outbox auth linkedin login",
+            "command": "publo auth linkedin login",
             "scopes": scopes
         })
     } else if author_urn.is_none() {
@@ -739,12 +740,12 @@ fn show_linkedin_auth_guide() -> Result<Value, AppError> {
             "message": "Access token exists but LINKEDIN_AUTHOR_URN is missing.",
             "required_env": ["LINKEDIN_AUTHOR_URN"],
             "example": "urn:li:person:xxxxxxxx",
-            "command": "outbox auth linkedin whoami"
+            "command": "publo auth linkedin whoami"
         })
     } else {
         json!({
             "message": "LinkedIn auth appears ready.",
-            "command": "outbox publish linkedin --file <path>"
+            "command": "publo publish linkedin --file <path>"
         })
     };
 
@@ -760,12 +761,12 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
     let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
         message: "X_CLIENT_ID is missing.".to_string(),
         suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
-        command: Some("outbox auth x login".to_string()),
+        command: Some("publo auth x login".to_string()),
     })?;
     let redirect_uri = env_non_empty("X_REDIRECT_URI").ok_or(AppError::MissingAuth {
         message: "X_REDIRECT_URI is missing.".to_string(),
         suggestion: Some("Set X_REDIRECT_URI in .env and match it in your X app callback URL settings.".to_string()),
-        command: Some("outbox auth x login".to_string()),
+        command: Some("publo auth x login".to_string()),
     })?;
     let configured_scopes = env_non_empty("X_SCOPES").unwrap_or_else(|| DEFAULT_X_SCOPES.to_string());
     let scopes = ensure_x_required_scopes(&configured_scopes);
@@ -774,12 +775,12 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
     let redirect = Url::parse(&redirect_uri).map_err(|err| AppError::Validation {
         message: format!("Invalid X_REDIRECT_URI: {err}"),
         suggestion: Some("Use a full URL like http://127.0.0.1:8789/callback".to_string()),
-        command: Some("outbox auth x login".to_string()),
+        command: Some("publo auth x login".to_string()),
     })?;
     let host = redirect.host_str().ok_or(AppError::Validation {
         message: "X_REDIRECT_URI must include a host.".to_string(),
         suggestion: Some("Use localhost or 127.0.0.1 callback URL.".to_string()),
-        command: Some("outbox auth x login".to_string()),
+        command: Some("publo auth x login".to_string()),
     })?;
     let port = redirect.port().unwrap_or(80);
     let path = redirect.path().to_string();
@@ -854,7 +855,7 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
         Err(_) => Err(AppError::Validation {
             message: "Timed out waiting for X OAuth callback.".to_string(),
             suggestion: Some("Retry auth and complete browser consent within 5 minutes.".to_string()),
-            command: Some("outbox auth x login".to_string()),
+            command: Some("publo auth x login".to_string()),
         }),
     };
 
@@ -874,7 +875,7 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
             "token_type": auth_result.token_type,
             "next": {
                 "message": "X auth completed. You can publish now.",
-                "command": "outbox publish x --file <path>"
+                "command": "publo publish x --file <path>"
             }
         })),
         Err(err) => Err(err),
@@ -891,7 +892,7 @@ async fn exchange_x_code_manual(
             return Err(AppError::Validation {
                 message: "X OAuth state mismatch.".to_string(),
                 suggestion: Some("Use state returned from latest login/auth URL.".to_string()),
-                command: Some("outbox auth x login".to_string()),
+                command: Some("publo auth x login".to_string()),
             });
         }
     }
@@ -901,14 +902,14 @@ async fn exchange_x_code_manual(
         .ok_or(AppError::MissingAuth {
             message: "X_CLIENT_ID is missing.".to_string(),
             suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
-            command: Some("outbox auth x exchange --code <code> --state <state>".to_string()),
+            command: Some("publo auth x exchange --code <code> --state <state>".to_string()),
         })?;
     let redirect_uri = env_non_empty("X_REDIRECT_URI")
         .or_else(|| state_file.as_ref().map(|s| s.redirect_uri.clone()))
         .ok_or(AppError::MissingAuth {
             message: "X_REDIRECT_URI is missing.".to_string(),
             suggestion: Some("Set X_REDIRECT_URI in .env to match X app callback URL.".to_string()),
-            command: Some("outbox auth x exchange --code <code> --state <state>".to_string()),
+            command: Some("publo auth x exchange --code <code> --state <state>".to_string()),
         })?;
     let code_verifier = args
         .code_verifier
@@ -916,10 +917,10 @@ async fn exchange_x_code_manual(
         .ok_or(AppError::Validation {
             message: "Missing PKCE code verifier.".to_string(),
             suggestion: Some(
-                "Use --code-verifier or run outbox auth x login first so verifier is saved."
+                "Use --code-verifier or run publo auth x login first so verifier is saved."
                     .to_string(),
             ),
-            command: Some("outbox auth x login".to_string()),
+            command: Some("publo auth x login".to_string()),
         })?;
     let client_secret = env_non_empty("X_CLIENT_SECRET");
 
@@ -947,7 +948,7 @@ async fn exchange_x_code_manual(
         "token_type": auth_result.token_type,
         "next": {
             "message": "X auth exchange completed. You can publish now.",
-            "command": "outbox publish x --file <path>"
+            "command": "publo publish x --file <path>"
         }
     }))
 }
@@ -969,15 +970,15 @@ async fn run_x_token_refresh(config: &RuntimeConfig) -> Result<Value, AppError> 
     let refresh_token = env_non_empty("X_REFRESH_TOKEN").ok_or(AppError::MissingAuth {
         message: "No X refresh token found.".to_string(),
         suggestion: Some(
-            "Run outbox auth x login with offline.access scope, then retry token-refresh."
+            "Run publo auth x login with offline.access scope, then retry token-refresh."
                 .to_string(),
         ),
-        command: Some("outbox auth x token-status".to_string()),
+        command: Some("publo auth x token-status".to_string()),
     })?;
     let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
         message: "X_CLIENT_ID is missing.".to_string(),
         suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
-        command: Some("outbox auth x token-refresh".to_string()),
+        command: Some("publo auth x token-refresh".to_string()),
     })?;
     let client_secret = env_non_empty("X_CLIENT_SECRET");
 
@@ -1001,7 +1002,7 @@ async fn run_x_token_refresh(config: &RuntimeConfig) -> Result<Value, AppError> 
         "token_type": refreshed.token_type,
         "next": {
             "message": "Token refresh completed.",
-            "command": "outbox auth x token-status"
+            "command": "publo auth x token-status"
         }
     }))
 }
@@ -1052,25 +1053,25 @@ async fn process_x_callback(
                     .unwrap_or_default()
             ),
             suggestion: Some("Retry consent flow and ensure scopes are approved in X app settings.".to_string()),
-            command: Some("outbox auth x login".to_string()),
+            command: Some("publo auth x login".to_string()),
         });
     }
 
     let code = query.code.ok_or(AppError::Validation {
         message: "X callback did not include authorization code.".to_string(),
         suggestion: Some("Retry auth flow and complete consent.".to_string()),
-        command: Some("outbox auth x login".to_string()),
+        command: Some("publo auth x login".to_string()),
     })?;
     let returned_state = query.state.ok_or(AppError::Validation {
         message: "X callback did not include state.".to_string(),
         suggestion: Some("Retry auth flow.".to_string()),
-        command: Some("outbox auth x login".to_string()),
+        command: Some("publo auth x login".to_string()),
     })?;
     if returned_state != state.expected_state {
         return Err(AppError::Validation {
             message: "X OAuth state mismatch.".to_string(),
             suggestion: Some("Retry auth flow; ensure you use the latest auth URL.".to_string()),
-            command: Some("outbox auth x login".to_string()),
+            command: Some("publo auth x login".to_string()),
         });
     }
 
@@ -1257,29 +1258,29 @@ async fn start_linkedin_login(config: &RuntimeConfig) -> Result<Value, AppError>
     let client_id = env::var("LINKEDIN_CLIENT_ID").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_CLIENT_ID is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_CLIENT_ID in .env from your LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
     let redirect_uri = env::var("LINKEDIN_REDIRECT_URI").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_REDIRECT_URI is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_REDIRECT_URI in .env and match it in LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
     let scopes = env::var("LINKEDIN_SCOPES").unwrap_or_else(|_| "w_member_social".to_string());
     let client_secret = env::var("LINKEDIN_CLIENT_SECRET").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_CLIENT_SECRET is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_CLIENT_SECRET in .env from your LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
 
     let redirect = Url::parse(&redirect_uri).map_err(|err| AppError::Validation {
         message: format!("Invalid LINKEDIN_REDIRECT_URI: {err}"),
         suggestion: Some("Use a full URL like http://localhost:8788/callback".to_string()),
-        command: Some("outbox auth linkedin login".to_string()),
+        command: Some("publo auth linkedin login".to_string()),
     })?;
     let host = redirect.host_str().ok_or(AppError::Validation {
         message: "LINKEDIN_REDIRECT_URI must include a host.".to_string(),
         suggestion: Some("Use localhost or 127.0.0.1 callback URL.".to_string()),
-        command: Some("outbox auth linkedin login".to_string()),
+        command: Some("publo auth linkedin login".to_string()),
     })?;
     let port = redirect.port().unwrap_or(80);
     let path = redirect.path().to_string();
@@ -1347,7 +1348,7 @@ async fn start_linkedin_login(config: &RuntimeConfig) -> Result<Value, AppError>
         Err(_) => Err(AppError::Validation {
             message: "Timed out waiting for LinkedIn OAuth callback.".to_string(),
             suggestion: Some("Retry auth and complete browser consent within 5 minutes.".to_string()),
-            command: Some("outbox auth linkedin login".to_string()),
+            command: Some("publo auth linkedin login".to_string()),
         }),
     };
 
@@ -1368,7 +1369,7 @@ async fn start_linkedin_login(config: &RuntimeConfig) -> Result<Value, AppError>
             "name": auth_result.profile_name,
             "next": {
                 "message": "LinkedIn auth completed. You can publish now.",
-                "command": "outbox publish linkedin --file <path>"
+                "command": "publo publish linkedin --file <path>"
             }
         })),
         Err(err) => Err(err),
@@ -1420,25 +1421,25 @@ async fn process_linkedin_callback(
                     .unwrap_or_default()
             ),
             suggestion: Some("Retry consent flow and ensure scopes are approved in LinkedIn app settings.".to_string()),
-            command: Some("outbox auth linkedin login".to_string()),
+            command: Some("publo auth linkedin login".to_string()),
         });
     }
 
     let code = query.code.ok_or(AppError::Validation {
         message: "LinkedIn callback did not include authorization code.".to_string(),
         suggestion: Some("Retry auth flow and complete consent.".to_string()),
-        command: Some("outbox auth linkedin login".to_string()),
+        command: Some("publo auth linkedin login".to_string()),
     })?;
     let returned_state = query.state.ok_or(AppError::Validation {
         message: "LinkedIn callback did not include state.".to_string(),
         suggestion: Some("Retry auth flow.".to_string()),
-        command: Some("outbox auth linkedin login".to_string()),
+        command: Some("publo auth linkedin login".to_string()),
     })?;
     if returned_state != state.expected_state {
         return Err(AppError::Validation {
             message: "LinkedIn OAuth state mismatch.".to_string(),
             suggestion: Some("Retry auth flow; ensure you use the latest auth URL.".to_string()),
-            command: Some("outbox auth linkedin login".to_string()),
+            command: Some("publo auth linkedin login".to_string()),
         });
     }
 
@@ -1491,17 +1492,17 @@ async fn exchange_linkedin_code(
     let client_id = env::var("LINKEDIN_CLIENT_ID").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_CLIENT_ID is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_CLIENT_ID in .env from your LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
     let client_secret = env::var("LINKEDIN_CLIENT_SECRET").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_CLIENT_SECRET is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_CLIENT_SECRET in .env from your LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
     let redirect_uri = env::var("LINKEDIN_REDIRECT_URI").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_REDIRECT_URI is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_REDIRECT_URI in .env and match it in LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
 
     validate_oauth_state(&args.state)?;
@@ -1541,7 +1542,7 @@ async fn exchange_linkedin_code(
         "refresh_token_saved": body.refresh_token.is_some(),
         "next": {
             "message": "Resolve and save LINKEDIN_AUTHOR_URN before publishing.",
-            "command": "outbox auth linkedin whoami"
+            "command": "publo auth linkedin whoami"
         }
     }))
 }
@@ -1550,9 +1551,9 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
     let access_token = env::var("LINKEDIN_ACCESS_TOKEN").map_err(|_| AppError::MissingAuth {
         message: "No LinkedIn access token found.".to_string(),
         suggestion: Some(
-            "Run auth flow first: outbox auth linkedin login, then exchange.".to_string(),
+            "Run auth flow first: publo auth linkedin login, then exchange.".to_string(),
         ),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
 
     let userinfo = fetch_linkedin_userinfo(
@@ -1574,7 +1575,7 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
         "author_urn_saved_to_env": true,
         "next": {
             "message": "Author URN is ready. You can publish now.",
-            "command": "outbox publish linkedin --file <path>"
+            "command": "publo publish linkedin --file <path>"
         }
     }))
 }
@@ -1716,7 +1717,7 @@ async fn run_linkedin_token_refresh(config: &RuntimeConfig) -> Result<Value, App
             "Publish already attempts automatic refresh when access token fails. If publish fails, check token-status and retry token-refresh; if that still fails, run login and exchange."
                 .to_string(),
         ),
-        command: Some("outbox auth linkedin token-status".to_string()),
+        command: Some("publo auth linkedin token-status".to_string()),
     })?;
 
     let refreshed = refresh_linkedin_access_token(refresh_token, config).await?;
@@ -1730,7 +1731,7 @@ async fn run_linkedin_token_refresh(config: &RuntimeConfig) -> Result<Value, App
         "refresh_token_saved": refreshed.refresh_token.is_some(),
         "next": {
             "message": "Token refresh completed.",
-            "command": "outbox auth linkedin token-status"
+            "command": "publo auth linkedin token-status"
         }
     }))
 }
@@ -1876,7 +1877,7 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
             AppError::Validation {
                 message: format!("Invalid access token format: {err}"),
                 suggestion: Some("Re-authenticate and store a valid token.".to_string()),
-                command: Some("outbox auth linkedin guide".to_string()),
+                command: Some("publo auth linkedin guide".to_string()),
             }
         })?,
     );
@@ -1972,7 +1973,7 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
                     AppError::Validation {
                         message: format!("Invalid refreshed access token format: {err}"),
                         suggestion: Some("Re-run auth flow and retry publish.".to_string()),
-                        command: Some("outbox auth linkedin login".to_string()),
+                        command: Some("publo auth linkedin login".to_string()),
                     }
                 })?,
             );
@@ -2092,10 +2093,10 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
         return Err(AppError::MissingAuth {
             message: "X media upload requires media.write scope, but current token scope does not include it.".to_string(),
             suggestion: Some(
-                "Set X_SCOPES to include media.write, run `outbox auth x login`, then retry publish."
+                "Set X_SCOPES to include media.write, run `publo auth x login`, then retry publish."
                     .to_string(),
             ),
-            command: Some("outbox auth x login".to_string()),
+            command: Some("publo auth x login".to_string()),
         });
     }
     let bypass_duplicate = args.force || args.allow_duplicate;
@@ -2190,19 +2191,19 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
             if token_refreshed {
                 return Err(AppError::MissingAuth {
                     message: "X access token is invalid or expired for media upload.".to_string(),
-                    suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
-                    command: Some("outbox auth x login".to_string()),
+                    suggestion: Some("Run publo auth x login and retry publish.".to_string()),
+                    command: Some("publo auth x login".to_string()),
                 });
             }
             let refresh_token = auth.refresh_token.clone().ok_or(AppError::MissingAuth {
                 message: "X access token is invalid or expired for media upload.".to_string(),
-                suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
-                command: Some("outbox auth x login".to_string()),
+                suggestion: Some("Run publo auth x login and retry publish.".to_string()),
+                command: Some("publo auth x login".to_string()),
             })?;
             let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
                 message: "X_CLIENT_ID is missing.".to_string(),
                 suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
-                command: Some("outbox auth x token-refresh".to_string()),
+                command: Some("publo auth x token-refresh".to_string()),
             })?;
             let client_secret = env_non_empty("X_CLIENT_SECRET");
             let refreshed = refresh_x_access_token(
@@ -2254,19 +2255,19 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
             if token_refreshed {
                 return Err(AppError::MissingAuth {
                     message: "X access token is invalid or expired.".to_string(),
-                    suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
-                    command: Some("outbox auth x login".to_string()),
+                    suggestion: Some("Run publo auth x login and retry publish.".to_string()),
+                    command: Some("publo auth x login".to_string()),
                 });
             }
             let refresh_token = auth.refresh_token.clone().ok_or(AppError::MissingAuth {
                 message: "X access token is invalid or expired.".to_string(),
-                suggestion: Some("Run outbox auth x login and retry publish.".to_string()),
-                command: Some("outbox auth x login".to_string()),
+                suggestion: Some("Run publo auth x login and retry publish.".to_string()),
+                command: Some("publo auth x login".to_string()),
             })?;
             let client_id = env_non_empty("X_CLIENT_ID").ok_or(AppError::MissingAuth {
                 message: "X_CLIENT_ID is missing.".to_string(),
                 suggestion: Some("Set X_CLIENT_ID in .env from your X app OAuth 2.0 settings.".to_string()),
-                command: Some("outbox auth x token-refresh".to_string()),
+                command: Some("publo auth x token-refresh".to_string()),
             })?;
             let client_secret = env_non_empty("X_CLIENT_SECRET");
             let refreshed = refresh_x_access_token(
@@ -2397,7 +2398,7 @@ fn validate_x_post_text(
                 "Keep at most one cashtag (for example: $AAPL), or use --allow-cashtag to bypass local check."
                     .to_string(),
             ),
-            command: Some("outbox publish x --file <path>".to_string()),
+            command: Some("publo publish x --file <path>".to_string()),
         });
     }
 
@@ -2412,7 +2413,7 @@ fn validate_x_post_text(
                 "Shorten text (URLs count as 23 chars; many non-ASCII/emoji chars count as 2), or use --allow-length to bypass local check."
                     .to_string(),
             ),
-            command: Some("outbox publish x --file <path>".to_string()),
+            command: Some("publo publish x --file <path>".to_string()),
         });
     }
 
@@ -2571,7 +2572,7 @@ fn load_linkedin_auth() -> Result<LinkedinAuth, AppError> {
         suggestion: Some(
             "Set LINKEDIN_ACCESS_TOKEN in .env after completing OAuth authorization.".to_string(),
         ),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
 
     let author_urn = env::var("LINKEDIN_AUTHOR_URN").map_err(|_| AppError::MissingAuth {
@@ -2579,7 +2580,7 @@ fn load_linkedin_auth() -> Result<LinkedinAuth, AppError> {
         suggestion: Some(
             "Set LINKEDIN_AUTHOR_URN (example: urn:li:person:...) in .env.".to_string(),
         ),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
 
     let version =
@@ -2598,7 +2599,7 @@ fn load_x_auth() -> Result<XAuth, AppError> {
     let access_token = env_non_empty("X_ACCESS_TOKEN").ok_or(AppError::MissingAuth {
         message: "No X access token found.".to_string(),
         suggestion: Some("Set X_ACCESS_TOKEN in .env from your X app user authorization.".to_string()),
-        command: Some("outbox publish x --file <path>".to_string()),
+        command: Some("publo publish x --file <path>".to_string()),
     })?;
     let refresh_token = env_non_empty("X_REFRESH_TOKEN");
     Ok(XAuth {
@@ -2962,7 +2963,6 @@ fn find_existing_publish(
     let Ok(raw) = fs::read_to_string(PUBLISH_LOG_PATH) else {
         return Ok(None);
     };
-
     for line in raw.lines().rev() {
         if line.trim().is_empty() {
             continue;
@@ -2981,8 +2981,8 @@ fn find_existing_publish(
 }
 
 fn append_publish_log(entry: &PublishLogEntry) -> Result<(), AppError> {
-    fs::create_dir_all(".outbox").map_err(|err| AppError::Io {
-        message: format!("Failed to create .outbox directory: {err}"),
+    fs::create_dir_all(DATA_DIR).map_err(|err| AppError::Io {
+        message: format!("Failed to create {DATA_DIR} directory: {err}"),
     })?;
     let line = serde_json::to_string(entry).map_err(|err| AppError::Io {
         message: format!("Failed to encode publish log entry: {err}"),
@@ -3011,12 +3011,12 @@ async fn refresh_linkedin_access_token(
     let client_id = env::var("LINKEDIN_CLIENT_ID").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_CLIENT_ID is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_CLIENT_ID in .env from your LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
     let client_secret = env::var("LINKEDIN_CLIENT_SECRET").map_err(|_| AppError::MissingAuth {
         message: "LINKEDIN_CLIENT_SECRET is missing.".to_string(),
         suggestion: Some("Set LINKEDIN_CLIENT_SECRET in .env from your LinkedIn app settings.".to_string()),
-        command: Some("outbox auth linkedin guide".to_string()),
+        command: Some("publo auth linkedin guide".to_string()),
     })?;
 
     let client = reqwest::Client::builder()
@@ -3205,10 +3205,10 @@ async fn x_upload_media_image(
         return Err(AppError::MissingAuth {
             message: "X media upload forbidden. Token may be missing media.write scope or app access for media upload.".to_string(),
             suggestion: Some(
-                "Ensure X_SCOPES includes media.write, re-run outbox auth x login, and verify app/project access."
+                "Ensure X_SCOPES includes media.write, re-run publo auth x login, and verify app/project access."
                     .to_string(),
             ),
-            command: Some("outbox auth x login".to_string()),
+            command: Some("publo auth x login".to_string()),
         });
     }
     if !status.is_success() {
@@ -3306,8 +3306,8 @@ fn pkce_code_challenge(code_verifier: &str) -> String {
 }
 
 fn save_oauth_state(state: &OAuthState) -> Result<(), AppError> {
-    fs::create_dir_all(".outbox").map_err(|err| AppError::Io {
-        message: format!("Failed to create .outbox directory: {err}"),
+    fs::create_dir_all(DATA_DIR).map_err(|err| AppError::Io {
+        message: format!("Failed to create {DATA_DIR} directory: {err}"),
     })?;
     let raw = serde_json::to_string(state).map_err(|err| AppError::Io {
         message: format!("Failed to encode OAuth state: {err}"),
@@ -3318,8 +3318,8 @@ fn save_oauth_state(state: &OAuthState) -> Result<(), AppError> {
 }
 
 fn save_x_oauth_state(state: &XOAuthState) -> Result<(), AppError> {
-    fs::create_dir_all(".outbox").map_err(|err| AppError::Io {
-        message: format!("Failed to create .outbox directory: {err}"),
+    fs::create_dir_all(DATA_DIR).map_err(|err| AppError::Io {
+        message: format!("Failed to create {DATA_DIR} directory: {err}"),
     })?;
     let raw = serde_json::to_string(state).map_err(|err| AppError::Io {
         message: format!("Failed to encode X OAuth state: {err}"),
@@ -3333,10 +3333,10 @@ fn load_x_oauth_state() -> Result<XOAuthState, AppError> {
     let raw = fs::read_to_string(X_OAUTH_STATE_PATH).map_err(|_| AppError::Validation {
         message: "X OAuth state file not found.".to_string(),
         suggestion: Some(
-            "Run outbox auth x login first, or pass --code-verifier to auth x exchange."
+            "Run publo auth x login first, or pass --code-verifier to auth x exchange."
                 .to_string(),
         ),
-        command: Some("outbox auth x login".to_string()),
+        command: Some("publo auth x login".to_string()),
     })?;
     serde_json::from_str::<XOAuthState>(&raw).map_err(|err| AppError::Io {
         message: format!("Failed to parse X OAuth state file: {err}"),
@@ -3350,8 +3350,8 @@ fn clear_x_oauth_state_file() {
 fn validate_oauth_state(input_state: &str) -> Result<(), AppError> {
     let raw = fs::read_to_string(OAUTH_STATE_PATH).map_err(|_| AppError::Validation {
         message: "OAuth state file not found. Start login again.".to_string(),
-        suggestion: Some("Run outbox auth linkedin login, then retry exchange with returned state.".to_string()),
-        command: Some("outbox auth linkedin login".to_string()),
+        suggestion: Some("Run publo auth linkedin login, then retry exchange with returned state.".to_string()),
+        command: Some("publo auth linkedin login".to_string()),
     })?;
     let expected: OAuthState = serde_json::from_str(&raw).map_err(|err| AppError::Io {
         message: format!("Failed to parse OAuth state file: {err}"),
@@ -3360,7 +3360,7 @@ fn validate_oauth_state(input_state: &str) -> Result<(), AppError> {
         return Err(AppError::Validation {
             message: "OAuth state mismatch.".to_string(),
             suggestion: Some("Use the exact state value returned by login command.".to_string()),
-            command: Some("outbox auth linkedin login".to_string()),
+            command: Some("publo auth linkedin login".to_string()),
         });
     }
     Ok(())

@@ -1,4 +1,4 @@
 target/
 .env
-.outbox/
+.publo/
 test_files/

@@ -894,27 +894,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "outbox"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64",
- "chrono",
- "clap",
- "dotenvy",
- "rand 0.9.5",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "toml",
- "url",
- "urlencoding",
- "webbrowser",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -951,6 +930,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "publo"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "dotenvy",
+ "rand 0.9.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
+ "url",
+ "urlencoding",
+ "webbrowser",
 ]
 
 [[package]]

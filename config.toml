@@ -8,15 +8,15 @@ request_seconds = 30
 
 [signature]
 enabled = true
-text = "\n[Sent from outbox, by shk]"
+text = "\n[Sent from publo, by shk]"
 
 [platform.linkedin.signature]
 enabled = false
-# text = "\n[Sent from outbox, by shk]"
+# text = "\n[Sent from publo, by shk]"
 
 [platform.x.signature]
 enabled = true
-text = "\n\n[Sent from outbox, by Shamim.]"
+text = "\n\n[Sent from publo, by Shamim.]"
 
 [media]
 lookup_paths = ["/Users/shk/work/awesome/Files"]

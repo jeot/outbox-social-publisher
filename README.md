@@ -1,85 +1,127 @@
-# Outbox
+# Publo
 
-Local-first CLI for publishing content from files.
+Your personal publishing pipeline.  
+Your content stays local. Publo takes it from there.
 
-Current status: LinkedIn text publishing MVP in progress.
-X text publishing is available via guided OAuth 2.0 login.
+Vision and direction: [vision.md](vision.md)
+
+## Current status
+
+- LinkedIn: text + image + multi-image publishing
+- X: text + image publishing (up to 4 images)
+- Guided OAuth login for both platforms
+- Manual OAuth exchange fallback for both platforms
+- Token status/refresh commands for both platforms
+- Local-first parsing for Obsidian notes (`---` split + `![[...]]`)
+- Duplicate guard + JSONL publish log
+
+## Feature matrix
+
+| Capability | LinkedIn | X |
+|---|---|---|
+| Text post | ✅ | ✅ |
+| Single image | ✅ | ✅ |
+| Multi-image | ✅ (2-20) | ✅ (1-4) |
+| Guided OAuth callback login | ✅ | ✅ |
+| Manual OAuth exchange | ✅ | ✅ |
+| Token status | ✅ | ✅ |
+| Token refresh | ✅ | ✅ |
+| Auto refresh during publish on 401 | ✅ | ✅ |
+| Debug no-send mode (`--debug`) | ✅ | ✅ |
 
 ## Prerequisites
 
 - Rust toolchain (`cargo`)
-- A LinkedIn account
-- A LinkedIn developer app (steps below)
+- LinkedIn and/or X developer app
 
-## Quick Start
+If you are running directly from source without installing the binary, prepend commands with `cargo run --`  
+(example: `cargo run -- auth x login`).
 
-1. Copy environment template:
+## Quick start
+
+1. Copy env template:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Optional: choose readable JSON output:
-
-Set in `config.toml`:
+2. Configure readable JSON + local media lookup in `config.toml`:
 
 ```toml
 [output]
 pretty_json = true
-```
-
-Optional signature config (global + per-platform override):
-
-```toml
-[signature]
-enabled = true
-text = "\n[Sent from outbox, by shk]"
-
-[platform.linkedin.signature]
-enabled = true
-# text = "\n[Sent from outbox, by shk]"
-
-[platform.x.signature]
-enabled = false
-# text = "\n[Sent from outbox, by shk]"
 
 [media]
 lookup_paths = ["/absolute/path/to/media-assets"]
 ```
 
-3. Follow LinkedIn app setup and OAuth steps in the next sections.
-
-4. Publish from a local text file:
+3. Run auth:
 
 ```bash
-cargo run -- publish linkedin --file ./your-post.md
-cargo run -- publish x --file ./your-post.md
+publo auth linkedin login
+publo auth x login
 ```
 
-## LinkedIn Developer App Setup
+4. Validate without posting:
 
-1. Open LinkedIn Developer Portal and create (or select) an app.
-2. In app `Auth`, copy:
-   - `Client ID`
-   - `Client Secret`
-3. In app `Auth`, add an OAuth redirect URL.
-   - Example used by this repo: `http://localhost:8788/callback`
-   - It must exactly match `LINKEDIN_REDIRECT_URI` in your `.env`.
-4. In app `Products`, enable:
-   - `Share on LinkedIn`
-   - `Sign In with LinkedIn using OpenID Connect`
-5. For `Share on LinkedIn`, use the product version shown in your app portal and place it in `LINKEDIN_API_VERSION`.
+```bash
+publo publish linkedin --file ./post.md --debug
+publo publish x --file ./post.md --debug
+```
 
-Useful references:
+5. Publish:
 
-- [Authorization Code Flow](https://learn.microsoft.com/en-us/linkedin/shared/authentication/authorization-code-flow)
-- [LinkedIn Marketing Quick Start](https://learn.microsoft.com/en-us/linkedin/marketing/quick-start?view=li-lms-2026-07)
-- [Increasing Access](https://learn.microsoft.com/en-us/linkedin/marketing/increasing-access?view=li-lms-2026-06)
-- [Posts API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api?view=li-lms-2026-06)
+```bash
+publo publish linkedin --file ./post.md
+publo publish x --file ./post.md
+```
 
-## `.env` Values
+## Recommended local workflow (Obsidian-friendly)
 
-Set these values in `.env`:
+- Keep your content in local markdown files.
+- Optional metadata/properties above separators.
+- Publishable content starts after the **last** `---`.
+- Image embeds `![[...]]` can appear anywhere in the file.
+- Publo resolves image files from:
+  1) note folder  
+  2) `[media].lookup_paths` in `config.toml`
+
+This keeps content local and avoids copy/paste into SaaS editors.
+
+## `config.toml` options
+
+```toml
+[output]
+pretty_json = true
+
+[timeouts]
+connect_seconds = 10
+request_seconds = 30
+
+[signature]
+enabled = true
+text = "\n[Sent from publo]"
+
+[platform.linkedin.signature]
+enabled = true
+# text = "\n[Sent from publo]"
+
+[platform.x.signature]
+enabled = false
+# text = "\n[Sent from publo]"
+
+[media]
+lookup_paths = ["/absolute/path/to/media-assets"]
+```
+
+Signature precedence:
+
+- CLI flag (`--add-signature` / `--no-signature`)
+- platform signature config
+- global signature config
+- default off
+
+## `.env` values
 
 ```dotenv
 # LinkedIn app credentials/settings
@@ -87,6 +129,7 @@ LINKEDIN_CLIENT_ID=
 LINKEDIN_CLIENT_SECRET=
 LINKEDIN_REDIRECT_URI=http://localhost:8788/callback
 LINKEDIN_SCOPES='w_member_social openid profile'
+LINKEDIN_API_VERSION=202607
 
 # LinkedIn runtime auth values
 LINKEDIN_ACCESS_TOKEN=
@@ -94,7 +137,6 @@ LINKEDIN_REFRESH_TOKEN=
 LINKEDIN_ACCESS_TOKEN_EXPIRES_IN=
 LINKEDIN_REFRESH_TOKEN_EXPIRES_IN=
 LINKEDIN_AUTHOR_URN=urn:li:person:
-LINKEDIN_API_VERSION=202607
 
 # X app credentials/settings
 X_CLIENT_ID=
@@ -106,438 +148,134 @@ X_SCOPES='tweet.read tweet.write users.read media.write offline.access'
 X_ACCESS_TOKEN=
 X_REFRESH_TOKEN=
 X_ACCESS_TOKEN_EXPIRES_IN=
+X_TOKEN_TYPE=
 ```
 
-## X Quick Start (Guided OAuth 2.0)
+## LinkedIn setup
 
-### Billing heads-up (important)
+1. Create/select app in LinkedIn Developer Portal.
+2. Add redirect URL exactly matching `LINKEDIN_REDIRECT_URI`.
+3. Enable products:
+   - Share on LinkedIn
+   - Sign In with LinkedIn using OpenID Connect
+4. Set `LINKEDIN_API_VERSION` to active version from your app portal.
 
-X API posting uses **pay-per-usage** pricing. Before testing publish calls, verify your project has available credits.
-
-- Open [X Developer Console](https://console.x.com/)
-- Go to your Project/App billing
-- Add credits in **Billing → Credits**
-
-If credits are depleted, publish returns an explicit `402` error:
-
-```json
-{
-  "ok": false,
-  "error_type": "http_error",
-  "message": "X API returned 402",
-  "http_status": 402,
-  "api_error": {
-    "detail": "credits depleted",
-    "status": 402,
-    "title": "Payment Required",
-    "type": "https://api.x.com/2/problems/credits-depleted"
-  },
-  "retryable": false,
-  "suggestion": "X API credits are depleted for this app/project. Enable billing or upgrade access in X Developer Portal, then retry publish.",
-  "command": null
-}
-```
-
-URL-cost behavior observed during testing:
-
-- Posts containing explicit `https://...` or `http://...` were billed as **with URL** requests.
-- Bare domains like `google.com` and `shamimkeshani.ir` were not billed at the higher URL rate in our tests.
-
-Because provider billing behavior can change, verify current rates and categories in X pricing docs and your usage dashboard.
-
-### 1) Create/Configure app in X Console
-
-Open [X Developer Console](https://console.x.com/) and create/select your Project + App.
-
-In **User authentication settings** (OAuth 2.0), use:
-
-- **Type of App**: `Native App` (`Public client`)
-- **App permissions**: `Read and write`
-- **Request email from users**: `Off` (not needed for posting)
-- **Callback / Redirect URL**: exactly `http://127.0.0.1:8789/callback`
-- **Website URL**: your repo URL (for example `https://github.com/jeot/outbox-social-publisher`)
-
-Save settings.
-
-### 2) Copy OAuth 2.0 keys and set `.env`
-
-From X Console, copy:
-
-- `X_CLIENT_ID` (from OAuth 2.0 Keys)
-- `X_CLIENT_SECRET` (if shown for your app type/settings)
-
-Set:
-
-- `X_REDIRECT_URI=http://127.0.0.1:8789/callback`
-- `X_SCOPES='tweet.read tweet.write users.read media.write offline.access'`
-
-### 3) Understand key naming (important)
-
-X Console may also show:
-
-- `X_CONSUMER_KEY`
-- `X_SECRET_KEY`
-- `X_BEARER_TOKEN`
-
-These are app-level credentials from API key/bearer models and are **not** the `X_ACCESS_TOKEN` used by this CLI OAuth 2.0 user flow.
-
-For this repository flow, use:
-
-- `X_CLIENT_ID`
-- `X_CLIENT_SECRET` (if present)
-- `X_REDIRECT_URI`
-- `X_SCOPES`
-
-Then `outbox auth x login` obtains and saves:
-
-- `X_ACCESS_TOKEN`
-- optional `X_REFRESH_TOKEN`
-
-You can remove `X_CONSUMER_KEY`, `X_SECRET_KEY`, and `X_BEARER_TOKEN` from `.env` if you are not implementing OAuth 1.0a/app-only endpoints.
-
-### 4) Run guided login
+Auth commands:
 
 ```bash
-cargo run -- auth x login
+publo auth linkedin guide
+publo auth linkedin login
+publo auth linkedin exchange --code <code> --state <state>
+publo auth linkedin whoami
+publo auth linkedin token-status
+publo auth linkedin token-refresh
 ```
 
-Behavior:
-
-- starts localhost callback server
-- opens browser and prints auth URL
-- waits for callback (Ctrl-C cancels)
-- exchanges code for token and saves `.env`
-- shows success/failure in both browser and terminal
-
-Manual fallback (if callback flow cannot complete):
+Publish:
 
 ```bash
-cargo run -- auth x exchange --code <code> --state <state>
+publo publish linkedin --file ./post.md
 ```
 
-This command reuses saved PKCE verifier from the latest `auth x login`. You can also pass `--code-verifier` explicitly.
+Options:
 
-### 5) Publish
+- `--allow-duplicate`
+- `--debug`
+- `--add-signature`
+- `--no-signature`
+
+Image limits:
+
+- single image: supported
+- multi-image: supported, max 20
+- allowed extensions: `.png`, `.jpg`, `.jpeg`
+
+## X setup
+
+### Billing heads-up
+
+X API is pay-per-usage. Add credits in **console.x.com → Billing → Credits**.
+
+If credits are depleted, you will get `402` with `credits depleted`.
+
+### App settings
+
+In X OAuth 2.0 user auth settings:
+
+- Type: `Native App` (`Public client`)
+- Permissions: `Read and write`
+- Callback URL: `http://127.0.0.1:8789/callback`
+- Scopes include `media.write` for image posting
+
+Auth commands:
 
 ```bash
-cargo run -- publish x --file ./post.md
+publo auth x login
+publo auth x exchange --code <code> --state <state>
+publo auth x token-status
+publo auth x token-refresh
 ```
 
-For image posts (`![[...]]` embeds in your note), if you changed scopes or first enabled media posting, re-run login so the latest token includes `media.write`:
+If you change scopes, run `auth x login` again to issue a new token.
+
+Publish:
 
 ```bash
-cargo run -- auth x login
+publo publish x --file ./post.md
 ```
 
-Expected success JSON:
+Options:
 
-```json
-{
-  "ok": true,
-  "platform": "x",
-  "post_id": "<tweet-id>",
-  "post_url": "https://x.com/i/web/status/<tweet-id>",
-  "request_id": "<x-request-id-or-null>",
-  "published_at": "2026-08-15T12:34:56Z"
-}
-```
+- `--allow-duplicate`
+- `--allow-cashtag`
+- `--allow-length`
+- `--force`
+- `--debug`
+- `--add-signature`
+- `--no-signature`
 
-X token helpers:
+Image limits:
 
-```bash
-cargo run -- auth x token-status
-cargo run -- auth x token-refresh
-```
+- single/multi-image supported
+- max 4 images
+- allowed extensions: `.png`, `.jpg`, `.jpeg`
 
-## Auth Commands (Non-Interactive)
+## Obsidian parsing rules
 
-1. Check what is missing:
+- Publish text = content after the last `---`.
+- If only one separator exists, text is after it.
+- If no separator exists, full file is text.
+- `![[...]]` placeholders are removed from outgoing text.
+- Final text is trimmed.
 
-```bash
-cargo run -- auth linkedin guide
-```
+## Debug mode (safe, no posting)
 
-Expected JSON (first run):
+Use `--debug` on publish commands.
 
-```json
-{
-  "mode": "auth_guide",
-  "next": {
-    "command": "outbox auth linkedin guide",
-    "message": "LinkedIn app settings are incomplete.",
-    "required_env": [
-      "LINKEDIN_CLIENT_ID",
-      "LINKEDIN_REDIRECT_URI",
-      "LINKEDIN_CLIENT_SECRET"
-    ]
-  },
-  "ok": true,
-  "platform": "linkedin"
-}
-```
+It validates:
 
-2. Start OAuth login (guided flow):
+- parsing + final text
+- media resolution
+- extension rules
+- duplicate guard
+- platform preflight checks
 
-```bash
-cargo run -- auth linkedin login
-```
+It returns payload preview JSON and does not send API publish requests.
 
-What it does:
+## Output and logs
 
-- starts a localhost callback server from `LINKEDIN_REDIRECT_URI`
-- opens browser (and also prints the auth URL)
-- waits for callback (Ctrl-C cancels)
-- exchanges code for tokens automatically
-- resolves `/v2/userinfo` automatically and saves `LINKEDIN_AUTHOR_URN`
-- shows matched status in browser + terminal JSON
+- All command output is JSON.
+- Publish success includes:
+  - `post_id`, `post_url`, `request_id`, `published_at`
+  - `fingerprint`, `file_sha256`, `text_sha256`
+  - `token_refreshed`
+- Local log: `.publo/publish-log.jsonl`
 
-Expected JSON:
+## Exit codes
 
-```json
-{
-  "browser_opened": true,
-  "access_token_saved": true,
-  "access_token_expires_in": 5183999,
-  "author_urn": "urn:li:person:<id>",
-  "author_urn_saved_to_env": true,
-  "mode": "auth_linkedin_login",
-  "name": "<member name>",
-  "next": {
-    "command": "outbox publish linkedin --file <path>",
-    "message": "LinkedIn auth completed. You can publish now."
-  },
-  "ok": true,
-  "platform": "linkedin",
-  "refresh_token_saved": false
-}
-```
-
-3. Optional manual fallback (only if callback flow is unavailable):
-
-```bash
-cargo run -- auth linkedin exchange --code <copied-code> --state <state-from-login>
-```
-
-This exchanges and stores token values in your local `.env`. Then run:
-
-```bash
-cargo run -- auth linkedin whoami
-```
-
-Expected JSON:
-
-```json
-{
-  "access_token_expires_in": 5183999,
-  "mode": "auth_exchange",
-  "next": {
-    "command": "outbox auth linkedin whoami",
-    "message": "Resolve and save LINKEDIN_AUTHOR_URN before publishing."
-  },
-  "ok": true,
-  "platform": "linkedin",
-  "refresh_token_saved": false,
-  "token_saved_to_env": true
-}
-```
-
-4. Check current token availability/state:
-
-```bash
-cargo run -- auth linkedin token-status
-```
-
-Expected JSON:
-
-```json
-{
-  "ok": true,
-  "platform": "linkedin",
-  "mode": "auth_token_status",
-  "access_token_present": true,
-  "refresh_token_present": false,
-  "author_urn_present": true,
-  "access_token_expires_in": "5183999",
-  "refresh_token_expires_in": null
-}
-```
-
-5. Force a refresh attempt (for explicit verification):
-
-```bash
-cargo run -- auth linkedin token-refresh
-```
-
-Expected success JSON:
-
-```json
-{
-  "ok": true,
-  "platform": "linkedin",
-  "mode": "auth_token_refresh",
-  "token_refreshed": true,
-  "access_token_expires_in": 5183999,
-  "refresh_token_saved": true,
-  "next": {
-    "message": "Token refresh completed.",
-    "command": "outbox auth linkedin token-status"
-  }
-}
-```
-
-## First Publish
-
-1. Create a text file with the post content.
-2. Run:
-
-```bash
-cargo run -- publish linkedin --file ./post.md
-```
-
-Expected success JSON:
-
-```json
-{
-  "ok": true,
-  "platform": "linkedin",
-  "post_id": "<linkedin-post-id-or-restli-id>",
-  "post_url": null,
-  "request_id": "<restli-id>",
-  "published_at": "2026-08-15T12:34:56Z",
-  "token_refreshed": false
-}
-```
-
-Historical first live publish output:
-
-```json
-{
-  "ok": true,
-  "platform": "linkedin",
-  "post_id": "urn:li:share:7494283356650733568",
-  "post_url": null,
-  "published_at": "2026-08-15T06:46:29.236629+00:00",
-  "request_id": "urn:li:share:7494283356650733568"
-}
-```
-
-Recent publish output with link and file hash:
-
-```json
-{
-  "file_sha256": "af2ba976553469d7f44589354dfba2f8628a29809c8b270235484c779d541024",
-  "duplicate_guard": "checked",
-  "fingerprint": "1d9469a2e2b19154b6296d7cd4b06f3e34f5c7c9193e07fb470658a0064b1acf",
-  "ok": true,
-  "platform": "linkedin",
-  "post_id": "urn:li:share:7494294095167774720",
-  "post_url": "https://www.linkedin.com/feed/update/urn:li:share:7494294095167774720/",
-  "published_at": "2026-08-15T07:29:09.466218+00:00",
-  "request_id": "urn:li:share:7494294095167774720",
-  "token_refreshed": false
-}
-```
-
-Direct post URL format from returned `post_id`:
-
-```text
-https://www.linkedin.com/feed/update/<post_id>/
-```
-
-Example:
-
-```text
-https://www.linkedin.com/feed/update/urn:li:share:7494283356650733568/
-```
-
-If access token is expired and refresh token is available, publish automatically:
-
-- refreshes token once
-- retries publish once
-- updates `.env` token values
-- returns `token_refreshed: true` on success after refresh
-
-Duplicate protection:
-
-- publishes are fingerprinted by `platform + author_urn + normalized content`
-- same fingerprint is blocked by default to prevent accidental duplicate posts
-- use `--allow-duplicate` only when you intentionally want to repost
-
-Example override:
-
-```bash
-cargo run -- publish linkedin --file ./post.md --allow-duplicate
-```
-
-Signature behavior:
-
-- Precedence: CLI flag > platform config > global config > off
-- CLI flags (both LinkedIn and X):
-  - `--add-signature` force add signature for this run
-  - `--no-signature` force disable signature for this run
-- If signature is enabled but no text is configured, publish returns validation error.
-
-Examples:
-
-```bash
-cargo run -- publish linkedin --file ./post.md --add-signature
-cargo run -- publish linkedin --file ./post.md --no-signature
-cargo run -- publish x --file ./post.md --add-signature
-```
-
-Debug mode (no publish side effects):
-
-- Use `--debug` to validate and preview a publish without sending it.
-- It validates file parsing, media resolution, text cleanup, duplicate guard rules, and preflight checks.
-- It returns parsed text, resolved media paths, and payload preview JSON.
-
-Examples:
-
-```bash
-cargo run -- publish linkedin --file ./post.md --debug
-cargo run -- publish x --file ./post.md --debug
-```
-
-Local publish history is stored in `.outbox/publish-log.jsonl`.
-
-`jsonl` means JSON Lines: one JSON object per line. This keeps history append-only and easy to inspect with shell tools.
-
-## Obsidian Markdown Parsing Rules
-
-`--file` can be an Obsidian note. Parsing behavior:
-
-- Image embeds are discovered from the **entire file** in order: `![[...]]`
-- Publish text is the section **after the last** `---` separator line
-  - If only one `---` exists, text is after that separator
-  - If no `---` exists, full file is treated as publish text
-- `![[...]]` placeholders are removed from publish text before sending
-- Final text is trimmed at start/end
-
-Media resolution order:
-
-1. Note's own folder
-2. `config.toml` `[media].lookup_paths` entries (in order)
-
-Allowed image extensions:
-
-- `.png`
-- `.jpg`
-- `.jpeg`
-
-If a referenced image is missing or unsupported, publish is blocked with a validation error.
-
-Current platform status:
-
-- LinkedIn: single-image upload supported (if one image embed is found)
-- LinkedIn: multi-image upload supported (2-20 images, using MultiImage content)
-- X: single/multi-image upload supported (up to 4 images per post)
-
-## Command Behavior
-
-- Output is JSON for scripting and machine parsing.
-- Exit codes:
-  - `0`: success
-  - `2`: validation error
-  - `3`: missing auth/config
-  - `4`: local IO error
-  - `5`: HTTP/API error
+- `0`: success
+- `2`: validation error
+- `3`: missing auth/config
+- `4`: local IO error
+- `5`: HTTP/API error
+- `6`: duplicate publish blocked

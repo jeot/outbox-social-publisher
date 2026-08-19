@@ -1,4 +1,4 @@
-# Outbox Roadmap
+# Publo Roadmap
 
 ## Phase 1 - Foundation (Local CLI + LinkedIn MVP)
 
@@ -12,7 +12,7 @@
 - [x] Add config loading strategy:
 - [x] Secrets in `.env` and always keep `.env.example` in sync.
 - [x] Non-secret defaults in `config.toml` (timeouts, log level, output mode, paths).
-- [x] Implement `outbox publish linkedin --file <path>` command.
+- [x] Implement `publo publish linkedin --file <path>` command.
 - [x] Implement LinkedIn OAuth setup flow for a single personal account.
 - [x] Add non-interactive auth commands: `guide`, `login`, `exchange --code --state`, `whoami`.
 - [x] Add token tooling commands: `token-status`, `token-refresh`.
@@ -30,7 +30,7 @@
 
 - [x] Implement X platform adapter behind shared publisher interface.
 - [x] Add guided X OAuth login (local callback server + browser flow) and token storage.
-- [x] Add `outbox publish x --file <path>` command path.
+- [x] Add `publo publish x --file <path>` command path.
 - [x] Add shared duplicate guard + JSONL publish logging parity for X.
 - [x] Add X preflight validation for weighted-length and self-serve cashtag rule.
 - [x] Add X bypass flags: `--allow-cashtag`, `--allow-length`, `--allow-duplicate`, `--force`.
@@ -57,7 +57,7 @@
 ## Phase 4 - Scheduling and Background Worker (LinkedIn)
 
 - [ ] Define local schedule/state file format and job states (`ready`, `scheduled`, `publishing`, `published`, `failed`).
-- [ ] Add `outbox schedule add` and `outbox schedule list` commands.
+- [ ] Add `publo schedule add` and `publo schedule list` commands.
 - [ ] Add worker mode to process due jobs from local schedule storage.
 - [x] Add idempotency key strategy to prevent duplicate LinkedIn posts.
 - [ ] Add retry policy with capped attempts and error logging.
@@ -73,7 +73,7 @@
 
 - [ ] Evaluate and choose Substack integration strategy (official path or maintained community integration).
 - [ ] Implement Substack adapter behind shared publisher interface.
-- [ ] Add `outbox publish substack --file <path>` command path.
+- [ ] Add `publo publish substack --file <path>` command path.
 - [ ] Add scheduler integration for Substack with clear failure handling.
 - [ ] Isolate Substack-specific dependency and fallback path in docs.
 
@@ -81,7 +81,7 @@
 
 - [ ] Implement Instagram adapter behind shared publisher interface.
 - [ ] Add media validation requirements (image/video format and size checks).
-- [ ] Add `outbox publish instagram --file <path> --media <path>` command path.
+- [ ] Add `publo publish instagram --file <path> --media <path>` command path.
 - [ ] Add scheduler integration for Instagram and independent failure handling.
 - [ ] Add platform-specific preflight checks before scheduling.
 
@@ -108,6 +108,6 @@
 ## Backlog - Convenience UX
 
 - [ ] Add one-liner multi-platform command:
-  - Example: `outbox "Failure is part of building things."`
+  - Example: `publo "Failure is part of building things."`
   - Behavior: publish same text to all enabled/configured platforms.
   - Output: per-platform success/failure JSON summary.
