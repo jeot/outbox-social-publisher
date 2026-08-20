@@ -5,6 +5,8 @@ pretty_json = true
 connect_seconds = 10
 request_seconds = 30
 
+[db]
+path = ".publo/workspace/default/publo.db"
 
 [signature]
 enabled = true

@@ -12,7 +12,14 @@ use axum::Router;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use chrono::Utc;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use diesel::sqlite::SqliteConnection;
+use diesel::Connection;
+use diesel::RunQueryDsl;
+use diesel::QueryableByName;
+use diesel::sql_query;
+use diesel::sql_types::{Integer, Nullable, Text};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use rand::Rng;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -24,11 +31,13 @@ use urlencoding::encode;
 
 const DEFAULT_LINKEDIN_VERSION: &str = "202601";
 const DATA_DIR: &str = ".publo";
+const DEFAULT_DB_PATH: &str = ".publo/publo.db";
 const OAUTH_STATE_PATH: &str = ".publo/linkedin_oauth_state";
 const X_OAUTH_STATE_PATH: &str = ".publo/x_oauth_state";
 const PUBLISH_LOG_PATH: &str = ".publo/publish-log.jsonl";
 const ENV_PATH: &str = ".env";
 const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read media.write offline.access";
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 #[derive(Debug, Parser)]
 #[command(name = "publo")]
@@ -42,6 +51,7 @@ struct Cli {
 enum Commands {
     Publish(PublishArgs),
     Auth(AuthArgs),
+    Job(JobArgs),
 }
 
 #[derive(Debug, Args)]
@@ -107,6 +117,163 @@ enum AuthPlatform {
 }
 
 #[derive(Debug, Args)]
+struct JobArgs {
+    #[command(subcommand)]
+    command: JobCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum JobCommand {
+    Ready(JobReadyArgs),
+    Unready(JobIdArgs),
+    Schedule(JobScheduleArgs),
+    Unschedule(JobUnscheduleArgs),
+    AddSchedule(JobAddScheduleArgs),
+    Cancel(JobCancelArgs),
+    List(JobListArgs),
+    Show(JobShowArgs),
+    RunDebug(JobRunDebugArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum PlatformArg {
+    Linkedin,
+    X,
+}
+
+impl PlatformArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            PlatformArg::Linkedin => "linkedin",
+            PlatformArg::X => "x",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OperatorArg {
+    User,
+    Ai,
+}
+
+impl OperatorArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            OperatorArg::User => "user",
+            OperatorArg::Ai => "ai",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct JobReadyArgs {
+    #[arg(long, value_enum)]
+    platform: Option<PlatformArg>,
+    #[arg(long)]
+    file: PathBuf,
+    #[arg(long, default_value = "default")]
+    workspace_id: String,
+    #[arg(long)]
+    owner_user_id: Option<String>,
+    #[arg(long, value_enum, default_value = "user")]
+    by: OperatorArg,
+    #[arg(long)]
+    user_note: Option<String>,
+    #[arg(long)]
+    ai_note: Option<String>,
+    #[arg(long)]
+    ai_model: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct JobIdArgs {
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct JobScheduleArgs {
+    #[arg(long)]
+    id: String,
+    #[arg(long, value_enum)]
+    platform: Option<PlatformArg>,
+    #[arg(long)]
+    at: String,
+    #[arg(long)]
+    timezone: Option<String>,
+    #[arg(long, value_enum, default_value = "user")]
+    by: OperatorArg,
+    #[arg(long)]
+    user_note: Option<String>,
+    #[arg(long)]
+    ai_note: Option<String>,
+    #[arg(long)]
+    ai_model: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct JobUnscheduleArgs {
+    #[arg(long)]
+    id: String,
+    #[arg(long)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct JobAddScheduleArgs {
+    #[arg(long, value_enum)]
+    platform: PlatformArg,
+    #[arg(long)]
+    file: PathBuf,
+    #[arg(long)]
+    at: String,
+    #[arg(long)]
+    timezone: Option<String>,
+    #[arg(long, default_value = "default")]
+    workspace_id: String,
+    #[arg(long)]
+    owner_user_id: Option<String>,
+    #[arg(long, value_enum, default_value = "user")]
+    by: OperatorArg,
+    #[arg(long)]
+    user_note: Option<String>,
+    #[arg(long)]
+    ai_note: Option<String>,
+    #[arg(long)]
+    ai_model: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct JobCancelArgs {
+    #[arg(long)]
+    id: String,
+    #[arg(long)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct JobListArgs {
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long, value_enum)]
+    platform: Option<PlatformArg>,
+    #[arg(long, default_value_t = 100)]
+    limit: i64,
+}
+
+#[derive(Debug, Args)]
+struct JobShowArgs {
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct JobRunDebugArgs {
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Debug, Args)]
 struct AuthLinkedinArgs {
     #[command(subcommand)]
     command: AuthLinkedinCommand,
@@ -161,6 +328,7 @@ struct FileConfig {
     signature: Option<SignatureConfigFile>,
     platform: Option<PlatformConfig>,
     media: Option<MediaConfigFile>,
+    db: Option<DbConfigFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +364,11 @@ struct MediaConfigFile {
     lookup_paths: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DbConfigFile {
+    path: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct SignatureLayer {
     enabled: Option<bool>,
@@ -211,6 +384,7 @@ struct RuntimeConfig {
     linkedin_signature: SignatureLayer,
     x_signature: SignatureLayer,
     media_lookup_paths: Vec<PathBuf>,
+    db_path: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -352,6 +526,54 @@ struct PublishLogEntry {
     #[serde(default)]
     request_id: Option<String>,
     published_at: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct JobRow {
+    #[diesel(sql_type = Text)]
+    id: String,
+    #[diesel(sql_type = Text)]
+    batch_id: String,
+    #[diesel(sql_type = Text)]
+    kind: String,
+    #[diesel(sql_type = Text)]
+    status: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    platform: Option<String>,
+    #[diesel(sql_type = Text)]
+    workspace_id: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    owner_user_id: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    operator: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    user_note: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    ai_note: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    ai_model: Option<String>,
+    #[diesel(sql_type = Text)]
+    tags: String,
+    #[diesel(sql_type = Text)]
+    file_path: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    run_at_utc: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    timezone: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    status_reason: Option<String>,
+    #[diesel(sql_type = Integer)]
+    attempt_count: i32,
+    #[diesel(sql_type = Nullable<Text>)]
+    file_sha256: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    text_sha256: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    fingerprint: Option<String>,
+    #[diesel(sql_type = Text)]
+    created_at: String,
+    #[diesel(sql_type = Text)]
+    updated_at: String,
 }
 
 #[derive(Debug)]
@@ -591,12 +813,27 @@ struct LinkedinOAuthCallbackState {
 async fn main() -> ExitCode {
     let _ = dotenvy::from_filename_override(".env");
     let config = load_config();
+    if let Err(err) = ensure_db_ready(&config) {
+        print_json(&err.to_output(), config.pretty_json);
+        return ExitCode::from(err.exit_code());
+    }
     let cli = Cli::parse();
 
     let result: Result<Value, AppError> = match cli.command {
         Commands::Publish(publish) => match publish.platform {
             PublishPlatform::Linkedin(args) => publish_linkedin(args, &config).await,
             PublishPlatform::X(args) => publish_x(args, &config).await,
+        },
+        Commands::Job(job) => match job.command {
+            JobCommand::Ready(args) => job_ready(args, &config),
+            JobCommand::Unready(args) => job_unready(args, &config),
+            JobCommand::Schedule(args) => job_schedule(args, &config),
+            JobCommand::Unschedule(args) => job_unschedule(args, &config),
+            JobCommand::AddSchedule(args) => job_add_schedule(args, &config),
+            JobCommand::Cancel(args) => job_cancel(args, &config),
+            JobCommand::List(args) => job_list(args, &config),
+            JobCommand::Show(args) => job_show(args, &config),
+            JobCommand::RunDebug(args) => job_run_debug(args, &config),
         },
         Commands::Auth(auth) => match auth.platform {
             AuthPlatform::Linkedin(args) => match args.command {
@@ -646,6 +883,7 @@ fn load_config() -> RuntimeConfig {
             text: None,
         },
         media_lookup_paths: Vec::new(),
+        db_path: PathBuf::from(DEFAULT_DB_PATH),
     };
 
     let Ok(raw) = fs::read_to_string("config.toml") else {
@@ -696,6 +934,12 @@ fn load_config() -> RuntimeConfig {
         .and_then(|m| m.lookup_paths.as_ref())
         .map(|items| items.iter().map(PathBuf::from).collect())
         .unwrap_or_else(Vec::new);
+    let db_path = file_config
+        .db
+        .as_ref()
+        .and_then(|d| d.path.as_ref())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| defaults.db_path.clone());
 
     RuntimeConfig {
         pretty_json,
@@ -705,7 +949,702 @@ fn load_config() -> RuntimeConfig {
         linkedin_signature,
         x_signature,
         media_lookup_paths,
+        db_path,
     }
+}
+
+fn ensure_db_ready(config: &RuntimeConfig) -> Result<(), AppError> {
+    if let Some(parent) = config.db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|err| AppError::Io {
+                message: format!(
+                    "Failed to create DB directory {}: {err}",
+                    parent.display()
+                ),
+            })?;
+        }
+    }
+
+    let db_url = config.db_path.to_string_lossy().into_owned();
+    let mut conn = SqliteConnection::establish(&db_url).map_err(|err| AppError::Io {
+        message: format!(
+            "Failed to open SQLite DB at {}: {err}",
+            config.db_path.display()
+        ),
+    })?;
+
+    conn.run_pending_migrations(MIGRATIONS)
+        .map_err(|err| AppError::Io {
+            message: format!(
+                "Failed to run SQLite migrations for {}: {err}",
+                config.db_path.display()
+            ),
+        })?;
+
+    Ok(())
+}
+
+fn open_db(config: &RuntimeConfig) -> Result<SqliteConnection, AppError> {
+    let db_url = config.db_path.to_string_lossy().into_owned();
+    SqliteConnection::establish(&db_url).map_err(|err| AppError::Io {
+        message: format!(
+            "Failed to open SQLite DB at {}: {err}",
+            config.db_path.display()
+        ),
+    })
+}
+
+fn now_rfc3339_utc() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn generate_id() -> String {
+    let mut rng = rand::rng();
+    let bytes: [u8; 16] = rng.random();
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn parse_run_at_to_utc(input: &str) -> Result<String, AppError> {
+    let dt = chrono::DateTime::parse_from_rfc3339(input).map_err(|err| AppError::Validation {
+        message: format!("Invalid --at datetime. Expected RFC3339. Parse error: {err}"),
+        suggestion: Some(
+            "Use format like 2026-08-21T10:30:00+03:30 or 2026-08-21T07:00:00Z.".to_string(),
+        ),
+        command: None,
+    })?;
+    Ok(dt.with_timezone(&Utc).to_rfc3339())
+}
+
+fn validate_operator_notes(
+    operator: OperatorArg,
+    ai_note: &Option<String>,
+    ai_model: &Option<String>,
+) -> Result<(), AppError> {
+    if matches!(operator, OperatorArg::User) && (ai_note.is_some() || ai_model.is_some()) {
+        return Err(AppError::Validation {
+            message: "--ai-note/--ai-model require --by ai.".to_string(),
+            suggestion: Some("Use --by ai when providing AI metadata.".to_string()),
+            command: None,
+        });
+    }
+    Ok(())
+}
+
+fn job_ready(args: JobReadyArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    validate_operator_notes(args.by, &args.ai_note, &args.ai_model)?;
+    let parsed = parse_post_input(&args.file, config)?;
+    let final_text = if let Some(platform) = args.platform {
+        let signature_text = resolve_signature_text(config, to_publish_platform(platform), None)?;
+        if let Some(sig) = signature_text {
+            format!("{}{}", parsed.publish_text, sig)
+        } else {
+            parsed.publish_text
+        }
+    } else {
+        parsed.publish_text
+    };
+    let text_sha256 = compute_content_sha256(final_text.as_bytes());
+    let file_path = fs::canonicalize(&args.file).unwrap_or(args.file.clone());
+
+    let mut conn = open_db(config)?;
+    let now = now_rfc3339_utc();
+    let id = generate_id();
+    let batch_id = generate_id();
+    sql_query(
+        "INSERT INTO jobs (
+            id, batch_id, kind, status, platform, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model,
+            file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
+            created_at, updated_at, deleted_at, version, synced_at, modified_by
+         ) VALUES (
+            ?, ?, 'catalog', 'ready', ?, ?, ?, ?, ?, ?, ?,
+            ?, NULL, NULL, NULL, 0, ?, ?, NULL,
+            ?, ?, NULL, 1, NULL, 'local'
+         )",
+    )
+    .bind::<Text, _>(&id)
+    .bind::<Text, _>(&batch_id)
+    .bind::<Nullable<Text>, _>(args.platform.map(|p| p.as_str()))
+    .bind::<Text, _>(&args.workspace_id)
+    .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
+    .bind::<Text, _>(args.by.as_str())
+    .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+    .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+    .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+    .bind::<Text, _>(file_path.display().to_string())
+    .bind::<Text, _>(&parsed.file_sha256)
+    .bind::<Text, _>(&text_sha256)
+    .bind::<Text, _>(&now)
+    .bind::<Text, _>(&now)
+    .execute(&mut conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to insert ready job: {err}"),
+    })?;
+
+    Ok(json!({
+        "ok": true,
+        "mode": "job_ready",
+        "job_id": id,
+        "status": "ready",
+        "platform": args.platform.map(|p| p.as_str()),
+        "file_path": file_path.display().to_string(),
+        "workspace_id": args.workspace_id,
+        "operator": args.by.as_str(),
+        "file_sha256": parsed.file_sha256,
+        "text_sha256": text_sha256
+    }))
+}
+
+fn job_unready(args: JobIdArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    let mut conn = open_db(config)?;
+    let deleted = sql_query("DELETE FROM jobs WHERE id = ? AND status IN ('ready', 'blocked', 'canceled', 'disabled')")
+        .bind::<Text, _>(&args.id)
+        .execute(&mut conn)
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to remove job: {err}"),
+        })?;
+
+    if deleted == 0 {
+        return Err(AppError::Validation {
+            message: "No removable job found. Only ready/blocked/canceled can be unready-removed."
+                .to_string(),
+            suggestion: Some("Use job unschedule or job cancel first when status is scheduled.".to_string()),
+            command: None,
+        });
+    }
+
+    Ok(json!({
+        "ok": true,
+        "mode": "job_unready",
+        "job_id": args.id,
+        "removed": true
+    }))
+}
+
+fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    validate_operator_notes(args.by, &args.ai_note, &args.ai_model)?;
+    let mut conn = open_db(config)?;
+    let mut job = get_job_by_id(&mut conn, &args.id)?;
+    let run_at_utc = parse_run_at_to_utc(&args.at)?;
+    let timezone = args.timezone.clone();
+    let selected_platform = match (args.platform, job.platform.as_deref()) {
+        (Some(p), _) => p.as_str().to_string(),
+        (None, Some(existing)) => existing.to_string(),
+        (None, None) => {
+            return Err(AppError::Validation {
+                message: "This ready job has no platform. Pass --platform when scheduling."
+                    .to_string(),
+                suggestion: Some("Use --platform linkedin or --platform x.".to_string()),
+                command: None,
+            })
+        }
+    };
+    job.platform = Some(selected_platform);
+
+    match preflight_job(&job, config) {
+        Ok(preflight) => {
+            let now = now_rfc3339_utc();
+            sql_query(
+                "UPDATE jobs
+                 SET status = 'scheduled',
+                     platform = ?,
+                     run_at_utc = ?,
+                     timezone = ?,
+                     status_reason = NULL,
+                     operator = ?,
+                     user_note = COALESCE(?, user_note),
+                     ai_note = COALESCE(?, ai_note),
+                     ai_model = COALESCE(?, ai_model),
+                     file_sha256 = ?,
+                     text_sha256 = ?,
+                     fingerprint = ?,
+                     updated_at = ?,
+                     version = version + 1,
+                     synced_at = NULL,
+                     modified_by = 'local'
+                 WHERE id = ?",
+            )
+            .bind::<Nullable<Text>, _>(job.platform.as_deref())
+            .bind::<Text, _>(&run_at_utc)
+            .bind::<Nullable<Text>, _>(timezone.as_deref())
+            .bind::<Text, _>(args.by.as_str())
+            .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+            .bind::<Text, _>(&preflight.file_sha256)
+            .bind::<Text, _>(&preflight.text_sha256)
+            .bind::<Text, _>(&preflight.fingerprint)
+            .bind::<Text, _>(&now)
+            .bind::<Text, _>(&args.id)
+            .execute(&mut conn)
+            .map_err(|err| AppError::Io {
+                message: format!("Failed to schedule job: {err}"),
+            })?;
+
+            job = get_job_by_id(&mut conn, &args.id)?;
+            Ok(json!({
+                "ok": true,
+                "mode": "job_schedule",
+                "job": job_to_json(&job),
+                "preflight": preflight.details
+            }))
+        }
+        Err(err) => {
+            let now = now_rfc3339_utc();
+            let reason = err.to_output().message;
+            let _ = sql_query(
+                "UPDATE jobs
+                 SET status = 'blocked',
+                     status_reason = ?,
+                     operator = ?,
+                     user_note = COALESCE(?, user_note),
+                     ai_note = COALESCE(?, ai_note),
+                     ai_model = COALESCE(?, ai_model),
+                     updated_at = ?,
+                     version = version + 1,
+                     synced_at = NULL,
+                     modified_by = 'local'
+                 WHERE id = ?",
+            )
+            .bind::<Text, _>(&reason)
+            .bind::<Text, _>(args.by.as_str())
+            .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+            .bind::<Text, _>(&now)
+            .bind::<Text, _>(&args.id)
+            .execute(&mut conn);
+
+            Ok(json!({
+                "ok": false,
+                "mode": "job_schedule",
+                "status": "blocked",
+                "job_id": args.id,
+                "reason": reason,
+                "error": err.to_output()
+            }))
+        }
+    }
+}
+
+fn job_unschedule(args: JobUnscheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    let mut conn = open_db(config)?;
+    let now = now_rfc3339_utc();
+    let reason = args.reason.unwrap_or_else(|| "unscheduled manually".to_string());
+    let changed = sql_query(
+        "UPDATE jobs
+         SET status='ready',
+             run_at_utc=NULL,
+             timezone=NULL,
+             status_reason=?,
+             updated_at=?,
+             version=version+1,
+             synced_at=NULL,
+             modified_by='local'
+         WHERE id=? AND status='scheduled'",
+    )
+    .bind::<Text, _>(&reason)
+    .bind::<Text, _>(&now)
+    .bind::<Text, _>(&args.id)
+    .execute(&mut conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to unschedule job: {err}"),
+    })?;
+    if changed == 0 {
+        return Err(AppError::Validation {
+            message: "Only scheduled jobs can be unscheduled.".to_string(),
+            suggestion: None,
+            command: None,
+        });
+    }
+    let job = get_job_by_id(&mut conn, &args.id)?;
+    Ok(json!({"ok": true, "mode": "job_unschedule", "job": job_to_json(&job)}))
+}
+
+fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    validate_operator_notes(args.by, &args.ai_note, &args.ai_model)?;
+    let run_at_utc = parse_run_at_to_utc(&args.at)?;
+    let file_path = fs::canonicalize(&args.file).unwrap_or(args.file.clone());
+    let platform = args.platform.as_str();
+
+    let preflight_input = JobRow {
+        id: String::new(),
+        batch_id: String::new(),
+        kind: "catalog".to_string(),
+        status: "ready".to_string(),
+        platform: Some(platform.to_string()),
+        workspace_id: args.workspace_id.clone(),
+        owner_user_id: args.owner_user_id.clone(),
+        operator: Some(args.by.as_str().to_string()),
+        user_note: args.user_note.clone(),
+        ai_note: args.ai_note.clone(),
+        ai_model: args.ai_model.clone(),
+        tags: "[]".to_string(),
+        file_path: file_path.display().to_string(),
+        run_at_utc: None,
+        timezone: None,
+        status_reason: None,
+        attempt_count: 0,
+        file_sha256: None,
+        text_sha256: None,
+        fingerprint: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    match preflight_job(&preflight_input, config) {
+        Ok(preflight) => {
+            let mut conn = open_db(config)?;
+            let now = now_rfc3339_utc();
+            let id = generate_id();
+            let batch_id = generate_id();
+            sql_query(
+                "INSERT INTO jobs (
+                    id, batch_id, kind, status, platform, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model,
+                    file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
+                    created_at, updated_at, deleted_at, version, synced_at, modified_by
+                 ) VALUES (
+                    ?, ?, 'catalog', 'scheduled', ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, NULL, 0, ?, ?, ?,
+                    ?, ?, NULL, 1, NULL, 'local'
+                 )",
+            )
+            .bind::<Text, _>(&id)
+            .bind::<Text, _>(&batch_id)
+            .bind::<Nullable<Text>, _>(Some(platform))
+            .bind::<Text, _>(&args.workspace_id)
+            .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
+            .bind::<Text, _>(args.by.as_str())
+            .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+            .bind::<Text, _>(file_path.display().to_string())
+            .bind::<Text, _>(&run_at_utc)
+            .bind::<Nullable<Text>, _>(args.timezone.as_deref())
+            .bind::<Text, _>(&preflight.file_sha256)
+            .bind::<Text, _>(&preflight.text_sha256)
+            .bind::<Text, _>(&preflight.fingerprint)
+            .bind::<Text, _>(&now)
+            .bind::<Text, _>(&now)
+            .execute(&mut conn)
+            .map_err(|err| AppError::Io {
+                message: format!("Failed to add scheduled job: {err}"),
+            })?;
+            let job = get_job_by_id(&mut conn, &id)?;
+            Ok(json!({
+                "ok": true,
+                "mode": "job_add_schedule",
+                "job": job_to_json(&job),
+                "preflight": preflight.details
+            }))
+        }
+        Err(err) => {
+            let mut conn = open_db(config)?;
+            let now = now_rfc3339_utc();
+            let id = generate_id();
+            let batch_id = generate_id();
+            let reason = err.to_output().message;
+            sql_query(
+                "INSERT INTO jobs (
+                    id, batch_id, kind, status, platform, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model,
+                    file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
+                    created_at, updated_at, deleted_at, version, synced_at, modified_by
+                 ) VALUES (
+                    ?, ?, 'catalog', 'blocked', ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, 0, NULL, NULL, NULL,
+                    ?, ?, NULL, 1, NULL, 'local'
+                 )",
+            )
+            .bind::<Text, _>(&id)
+            .bind::<Text, _>(&batch_id)
+            .bind::<Nullable<Text>, _>(Some(platform))
+            .bind::<Text, _>(&args.workspace_id)
+            .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
+            .bind::<Text, _>(args.by.as_str())
+            .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+            .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+            .bind::<Text, _>(file_path.display().to_string())
+            .bind::<Text, _>(&run_at_utc)
+            .bind::<Nullable<Text>, _>(args.timezone.as_deref())
+            .bind::<Text, _>(&reason)
+            .bind::<Text, _>(&now)
+            .bind::<Text, _>(&now)
+            .execute(&mut conn)
+            .map_err(|db_err| AppError::Io {
+                message: format!("Failed to add blocked scheduled job: {db_err}"),
+            })?;
+            let job = get_job_by_id(&mut conn, &id)?;
+            Ok(json!({
+                "ok": false,
+                "mode": "job_add_schedule",
+                "job": job_to_json(&job),
+                "reason": reason,
+                "error": err.to_output()
+            }))
+        }
+    }
+}
+
+fn job_cancel(args: JobCancelArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    let mut conn = open_db(config)?;
+    let now = now_rfc3339_utc();
+    let reason = args.reason.unwrap_or_else(|| "canceled manually".to_string());
+    let changed = sql_query(
+        "UPDATE jobs
+         SET status='canceled',
+             status_reason=?,
+             updated_at=?,
+             version=version+1,
+             synced_at=NULL,
+             modified_by='local'
+         WHERE id=? AND status IN ('scheduled','blocked','failed','disabled')",
+    )
+    .bind::<Text, _>(&reason)
+    .bind::<Text, _>(&now)
+    .bind::<Text, _>(&args.id)
+    .execute(&mut conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to cancel job: {err}"),
+    })?;
+    if changed == 0 {
+        return Err(AppError::Validation {
+            message: "No cancelable job found for this id.".to_string(),
+            suggestion: None,
+            command: None,
+        });
+    }
+    let job = get_job_by_id(&mut conn, &args.id)?;
+    Ok(json!({"ok": true, "mode": "job_cancel", "job": job_to_json(&job)}))
+}
+
+fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    let mut conn = open_db(config)?;
+    let rows: Vec<JobRow> = match (args.status.as_ref(), args.platform) {
+        (Some(status), Some(platform)) => sql_query(
+            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+             FROM jobs
+             WHERE status = ? AND platform = ?
+             ORDER BY COALESCE(run_at_utc, created_at) ASC
+             LIMIT ?",
+        )
+        .bind::<Text, _>(status)
+        .bind::<Text, _>(platform.as_str())
+        .bind::<Integer, _>(args.limit as i32)
+        .load(&mut conn),
+        (Some(status), None) => sql_query(
+            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+             FROM jobs
+             WHERE status = ?
+             ORDER BY COALESCE(run_at_utc, created_at) ASC
+             LIMIT ?",
+        )
+        .bind::<Text, _>(status)
+        .bind::<Integer, _>(args.limit as i32)
+        .load(&mut conn),
+        (None, Some(platform)) => sql_query(
+            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+             FROM jobs
+             WHERE platform = ?
+             ORDER BY COALESCE(run_at_utc, created_at) ASC
+             LIMIT ?",
+        )
+        .bind::<Text, _>(platform.as_str())
+        .bind::<Integer, _>(args.limit as i32)
+        .load(&mut conn),
+        (None, None) => sql_query(
+            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+             FROM jobs
+             ORDER BY COALESCE(run_at_utc, created_at) ASC
+             LIMIT ?",
+        )
+        .bind::<Integer, _>(args.limit as i32)
+        .load(&mut conn),
+    }
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to list jobs: {err}"),
+    })?;
+
+    let items: Vec<Value> = rows.iter().map(job_to_json).collect();
+    Ok(json!({"ok": true, "mode": "job_list", "count": items.len(), "items": items}))
+}
+
+fn job_show(args: JobShowArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    let mut conn = open_db(config)?;
+    let job = get_job_by_id(&mut conn, &args.id)?;
+    Ok(json!({"ok": true, "mode": "job_show", "job": job_to_json(&job)}))
+}
+
+fn job_run_debug(args: JobRunDebugArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    let mut conn = open_db(config)?;
+    let job = get_job_by_id(&mut conn, &args.id)?;
+    match preflight_job(&job, config) {
+        Ok(preflight) => Ok(json!({
+            "ok": true,
+            "mode": "job_run_debug",
+            "job_id": job.id,
+            "platform": job.platform,
+            "publishable": true,
+            "preflight": preflight.details
+        })),
+        Err(err) => Ok(json!({
+            "ok": false,
+            "mode": "job_run_debug",
+            "job_id": job.id,
+            "platform": job.platform,
+            "publishable": false,
+            "error": err.to_output()
+        })),
+    }
+}
+
+fn get_job_by_id(conn: &mut SqliteConnection, id: &str) -> Result<JobRow, AppError> {
+    let mut rows: Vec<JobRow> = sql_query(
+        "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+         FROM jobs
+         WHERE id = ?
+         LIMIT 1",
+    )
+    .bind::<Text, _>(id)
+    .load(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to read job by id: {err}"),
+    })?;
+
+    rows.pop().ok_or(AppError::Validation {
+        message: format!("Job not found: {id}"),
+        suggestion: None,
+        command: None,
+    })
+}
+
+fn to_publish_platform(platform: PlatformArg) -> PublishPlatformKind {
+    match platform {
+        PlatformArg::Linkedin => PublishPlatformKind::Linkedin,
+        PlatformArg::X => PublishPlatformKind::X,
+    }
+}
+
+struct JobPreflightResult {
+    file_sha256: String,
+    text_sha256: String,
+    fingerprint: String,
+    details: Value,
+}
+
+fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightResult, AppError> {
+    let file_path = PathBuf::from(job.file_path.clone());
+    let parsed = parse_post_input(&file_path, config)?;
+    let media_sha = compute_media_signature(&parsed.media_paths)?;
+
+    match job.platform.as_deref() {
+        Some("linkedin") => {
+            let auth = load_linkedin_auth()?;
+            let signature_text = resolve_signature_text(config, PublishPlatformKind::Linkedin, None)?;
+            let commentary_raw = if let Some(sig) = signature_text {
+                format!("{}{}", parsed.publish_text, sig)
+            } else {
+                parsed.publish_text
+            };
+            let commentary_escaped = escape_little_text_plain(&commentary_raw);
+            let text_sha256 = compute_content_sha256(commentary_raw.as_bytes());
+            let fingerprint_source = combine_text_and_media_for_fingerprint(&commentary_raw, &media_sha);
+            let fingerprint = compute_fingerprint("linkedin", &auth.author_urn, &fingerprint_source);
+            Ok(JobPreflightResult {
+                file_sha256: parsed.file_sha256,
+                text_sha256,
+                fingerprint,
+                details: json!({
+                    "platform": "linkedin",
+                    "media_count": parsed.media_paths.len(),
+                    "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "text": commentary_raw,
+                    "commentary_escaped": commentary_escaped,
+                    "author": auth.author_urn
+                }),
+            })
+        }
+        Some("x") => {
+            let _auth = load_x_auth()?;
+            let signature_text = resolve_signature_text(config, PublishPlatformKind::X, None)?;
+            let text = if let Some(sig) = signature_text {
+                format!("{}{}", parsed.publish_text, sig)
+            } else {
+                parsed.publish_text
+            };
+            if !parsed.media_paths.is_empty() && !x_scope_contains("media.write") {
+                return Err(AppError::MissingAuth {
+                    message: "X media upload requires media.write scope, but current token scope does not include it.".to_string(),
+                    suggestion: Some(
+                        "Set X_SCOPES to include media.write, run `publo auth x login`, then retry."
+                            .to_string(),
+                    ),
+                    command: Some("publo auth x login".to_string()),
+                });
+            }
+            validate_x_post_text(&text, false, false)?;
+            let text_sha256 = compute_content_sha256(text.as_bytes());
+            let author_key = x_author_key();
+            let fingerprint_source = combine_text_and_media_for_fingerprint(&text, &media_sha);
+            let fingerprint = compute_fingerprint("x", &author_key, &fingerprint_source);
+            Ok(JobPreflightResult {
+                file_sha256: parsed.file_sha256,
+                text_sha256,
+                fingerprint,
+                details: json!({
+                    "platform": "x",
+                    "media_count": parsed.media_paths.len(),
+                    "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "text": text,
+                    "local_preflight": {
+                        "weighted_length": x_weighted_length(&text),
+                        "cashtag_count": extract_cashtags(&text).len()
+                    },
+                    "author": author_key
+                }),
+            })
+        }
+        Some(other) => Err(AppError::Validation {
+            message: format!("Unsupported job platform: {other}"),
+            suggestion: Some("Use --platform linkedin|x.".to_string()),
+            command: None,
+        }),
+        None => Err(AppError::Validation {
+            message: "Job has no platform yet.".to_string(),
+            suggestion: Some("Assign a platform when scheduling.".to_string()),
+            command: None,
+        }),
+    }
+}
+
+fn job_to_json(job: &JobRow) -> Value {
+    json!({
+        "id": job.id,
+        "batch_id": job.batch_id,
+        "kind": job.kind,
+        "status": job.status,
+        "platform": job.platform,
+        "workspace_id": job.workspace_id,
+        "owner_user_id": job.owner_user_id,
+        "operator": job.operator,
+        "user_note": job.user_note,
+        "ai_note": job.ai_note,
+        "ai_model": job.ai_model,
+        "tags": parse_tags_json(&job.tags),
+        "file_path": job.file_path,
+        "run_at_utc": job.run_at_utc,
+        "timezone": job.timezone,
+        "status_reason": job.status_reason,
+        "attempt_count": job.attempt_count,
+        "file_sha256": job.file_sha256,
+        "text_sha256": job.text_sha256,
+        "fingerprint": job.fingerprint,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at
+    })
+}
+
+fn parse_tags_json(raw: &str) -> Value {
+    serde_json::from_str::<Value>(raw).unwrap_or_else(|_| json!([]))
 }
 
 fn to_signature_layer(cfg: Option<&SignatureConfigFile>) -> SignatureLayer {

@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS publish_attempts;
+DROP TABLE IF EXISTS jobs;

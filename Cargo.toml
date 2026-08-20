@@ -8,6 +8,8 @@ axum = "0.8.4"
 base64 = "0.22.1"
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
 clap = { version = "4.5.16", features = ["derive"] }
+diesel = { version = "2.2.4", features = ["sqlite"] }
+diesel_migrations = "2.2.0"
 dotenvy = "0.15.7"
 reqwest = { version = "0.12.7", default-features = false, features = ["json", "rustls-tls"] }
 rand = "0.9.2"

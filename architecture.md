@@ -80,6 +80,36 @@ I may want to immediately publish this to X and/or a Substack Note without creat
 
 The system should make this kind of "publish now" workflow easy.
 
+## Lifecycle policy: DB constraints vs app logic
+
+This project separates storage constraints from workflow behavior.
+
+### DB-level constraints (minimal and stable)
+
+* `ready`: platform is optional (`NULL` or set).
+* all other statuses require platform (`NOT NULL`):
+  * `scheduled`, `publishing`, `published`, `failed`, `blocked`, `canceled`, `disabled`
+
+These are structural rules only, not UX policy.
+
+### App-level lifecycle policy (user workflow)
+
+* `ready` → `scheduled`
+* `scheduled` → `disabled` / `canceled` / `publishing`
+* `disabled` / `canceled` / `blocked` → `ready` or `scheduled` (reactivate)
+* `publishing` → `published` or `failed`
+* `failed` → `scheduled` (retry) or `ready`
+* `published`:
+  * preferred behavior: terminal state for that specific job
+  * if user wants repost later, create a new job (clean attempt/history model)
+
+### Practical UX interpretation
+
+* `ready` means publishable candidate; there is nothing to "cancel" yet.
+* `disabled` means platform toggled off intentionally (not deleted history).
+* `canceled` means previously planned execution was explicitly canceled.
+* reactivation should be explicit (`unschedule`/`schedule`/`move-to-ready`) rather than hidden state mutation.
+
 ## Content storage
 
 Prefer a file-based model.
@@ -257,3 +287,74 @@ It is:
 
 > How much less effort does it take me to consistently publish?
 
+## Cloud auth and desktop-assisted dashboard login (future)
+
+This section defines how Publo can support an online dashboard later without breaking the local-first trust model.
+
+### Goals
+
+* Keep local files as source of truth.
+* Allow optional cloud worker mode.
+* Avoid repeated manual login for CLI/background tasks.
+* Support fast dashboard login with desktop assistance.
+* Never rely on "whoever can run local CLI is automatically logged into cloud."
+
+### 1) CLI-to-cloud device pairing flow (initial setup)
+
+Used when linking a local Publo instance to a cloud account.
+
+1. User runs a command like `publo auth cloud link`.
+2. CLI requests a short-lived pairing challenge from server.
+3. CLI opens browser (and prints URL fallback).
+4. User confirms in web UI (login required at least once).
+5. Server binds device to user account and issues device-scoped credentials.
+6. CLI stores credentials locally and uses them for sync/worker API calls.
+
+Properties:
+
+* per-device revocation is possible
+* no long-lived password handling in CLI
+* ownership fields (for example `owner_user_id`) can be attached server-side
+
+### 2) Desktop-assisted dashboard login flow
+
+Used when user wants to sign into the SaaS dashboard quickly.
+
+1. User clicks "Sign in with Publo Desktop" on web dashboard.
+2. Web app shows one-time challenge (or starts standard device flow).
+3. Local Publo agent confirms challenge with server.
+4. Server creates normal browser session and sets secure session cookie.
+5. Dashboard is logged in.
+
+This feels close to one-click login while still keeping real server-side authentication.
+
+### Security boundaries
+
+* Do not silently bypass web authentication based only on local machine presence.
+* Use short-lived signed challenges and nonce/state validation.
+* All device credentials must be revocable.
+* Scope credentials by purpose (sync, worker, login assist) where practical.
+* Audit link/unlink/login-assist events.
+
+### Local vs remote worker model
+
+Only one execution authority at a time:
+
+* `local` mode: local worker publishes.
+* `remote` mode: cloud worker publishes.
+
+Dual active workers for the same account are not allowed to avoid race conditions and duplicate publishes.
+
+### Non-binding API shape examples (reference only)
+
+These are examples for future alignment, not strict requirements:
+
+* `POST /auth/device/start` → begin CLI-to-cloud pairing challenge
+* `POST /auth/device/confirm` → confirm challenge from browser session
+* `POST /auth/device/token` → CLI exchanges approved challenge for device-scoped credentials
+* `POST /auth/desktop-login/start` → begin dashboard login via desktop assist
+* `POST /auth/desktop-login/confirm` → local agent confirms one-time challenge
+* `POST /sync/pull` and `POST /sync/push` → state synchronization
+* `POST /worker/heartbeat` → worker liveness and ownership signal
+
+Each endpoint should later define: auth requirements, request/response shape, idempotency rules, TTL/expiry, and error model.

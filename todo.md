@@ -1,6 +1,10 @@
 # Publo Roadmap
 
+This roadmap keeps local files as the source of truth and builds operational layers on top in small, testable phases.
+
 ## Phase 1 - Foundation (Local CLI + LinkedIn MVP)
+
+Build a reliable local-first CLI with clear JSON contracts, auth basics, and production-safe error handling.
 
 - [x] Choose Rust workspace structure and CLI framework.
 - [x] Define minimal content file format for `publish-now` (single text file).
@@ -28,6 +32,8 @@
 
 ## Phase 2 - X Platform Support
 
+Bring X to feature parity with strong auth UX, validation, and publish safety.
+
 - [x] Implement X platform adapter behind shared publisher interface.
 - [x] Add guided X OAuth login (local callback server + browser flow) and token storage.
 - [x] Add `publo publish x --file <path>` command path.
@@ -44,6 +50,8 @@
 
 ## Phase 3 - Media (Images)
 
+Support file-driven media publishing while preserving Obsidian-friendly authoring.
+
 - [x] Define Obsidian-note parsing contract:
 - [x] Publish text from section after last `---`.
 - [x] Discover `![[...]]` media embeds from whole file (ordered).
@@ -54,53 +62,87 @@
 - [x] Add LinkedIn multi-image publish support (MultiImage API, 2-20 images).
 - [x] Add X image upload/publish support (1-4 images via media upload + `media_ids`).
 
-## Phase 4 - Scheduling and Background Worker (LinkedIn)
+## Phase 4 - State Model Foundation (SQLite + Lifecycle)
 
-- [ ] Define local schedule/state file format and job states (`ready`, `scheduled`, `publishing`, `published`, `failed`).
-- [ ] Add `publo schedule add` and `publo schedule list` commands.
-- [ ] Add worker mode to process due jobs from local schedule storage.
-- [x] Add idempotency key strategy to prevent duplicate LinkedIn posts.
-- [ ] Add retry policy with capped attempts and error logging.
-- [x] Add per-job publish audit log file (JSON lines) for direct publish commands.
+Create the persistent operational model for catalog, scheduling, attempts, and status transitions while keeping content in local files.
+
+- [x] Introduce SQLite storage for operational state (no content lock-in).
+- [x] Define schema for jobs, publish attempts, and sync metadata foundation.
+- [x] Define canonical status lifecycle (`ready`, `scheduled`, `publishing`, `published`, `failed`, `blocked`, `canceled`, `disabled`).
+- [x] Define status/platform constraint policy:
+- [x] `ready` may have platform or be platform-less.
+- [x] all non-`ready` statuses require a platform.
+- [x] Add migration/versioning strategy for schema evolution (auto-run pending migrations at startup).
+- [x] Record immutable attempt history for audit and debugging.
+- [x] Keep file path + hashes (`file_sha256`, `text_sha256`, `fingerprint`) linked to jobs.
+- [x] Add job metadata for operator attribution (`user|ai`), notes, and tags.
+
+## Phase 5 - Scheduling Core (CLI + Worker)
+
+Implement the core scheduling experience and long-running worker process that can reliably publish on time.
+
+- [x] Define schedule input contract (platform(s), time, timezone, file reference, optional note).
+- [x] Add job lifecycle commands (`publo job ready|unready|schedule|unschedule|add-schedule|list|show|cancel|run-debug`).
+- [x] Add schedule-time preflight behavior (auto block with reason on invalid/auth/content checks).
+- [x] Enforce lifecycle behavior in commands (no cancel on `ready`; assign platform at scheduling when missing).
+- [ ] Add `publo worker run` long-running process for due jobs.
+- [ ] Add retry policy with capped attempts and backoff.
+- [ ] Add dry-run mode for scheduler verification without publishing.
 - [ ] Extend audit logging coverage to scheduled worker attempts and retries.
 - [ ] Add OS integration docs for running worker in background (`launchd`, `systemd`, Task Scheduler).
-- [ ] Add dry-run mode for scheduler verification without publishing.
-- [ ] Add volume checkpoint for persistence strategy:
-- [ ] Stay file-first for early scale.
-- [ ] Define threshold and migration trigger to SQLite (for example around thousands of published items and growing query latency).
 
-## Phase 5 - Substack Support
+## Phase 6 - Content Catalog (Folder Mode + Readiness)
+
+Add folder-driven content discovery so users can browse local files, mark them ready, and schedule without moving content into a SaaS editor.
+
+- [ ] Add folder roots configuration for catalog scan.
+- [ ] Scan and index `.md` files as `discovered` items.
+- [ ] Track catalog metadata (path, title, modified time, hashes, media refs).
+- [ ] Add readiness commands (`mark-ready`, `mark-unready`) and list/filter views.
+- [ ] Handle file updates, moves, and deletions safely in catalog state.
+- [ ] Prevent scheduling of invalid or unresolved content items.
+
+## Phase 7 - Local GUI (List + Calendar + Actions)
+
+Build a local web UI on top of the same core engine so users can manage pipeline state visually.
+
+- [ ] Expose local API from Rust core for GUI consumption.
+- [ ] Build TypeScript GUI for:
+- [ ] Content catalog browsing (folders/files/readiness).
+- [ ] Schedule list and calendar views.
+- [ ] Job detail view with status timeline and error reason.
+- [ ] Actions: schedule, cancel, retry, publish-now, mark-ready.
+- [ ] Keep GUI as interface layer; keep publish/schedule logic in Rust core.
+
+## Phase 8 - Remote Worker + Sync (Optional)
+
+Allow always-on publishing even when laptop is offline by separating authoring location from worker runtime.
+
+- [ ] Define local-vs-remote worker execution model with same core semantics.
+- [ ] Define sync strategy for content + schedule state (tool-agnostic).
+- [ ] Add sync conflict policy and resolution rules.
+- [ ] Add remote secrets/auth management model.
+- [ ] Add result/status sync back to local machine and GUI.
+- [ ] Document offline behavior and recovery guarantees.
+
+## Phase 9 - Platform Expansion (Substack, Instagram)
+
+Expand platform coverage using the same publish pipeline and scheduler architecture.
 
 - [ ] Evaluate and choose Substack integration strategy (official path or maintained community integration).
 - [ ] Implement Substack adapter behind shared publisher interface.
 - [ ] Add `publo publish substack --file <path>` command path.
 - [ ] Add scheduler integration for Substack with clear failure handling.
 - [ ] Isolate Substack-specific dependency and fallback path in docs.
-
-## Phase 6 - Instagram Support
-
 - [ ] Implement Instagram adapter behind shared publisher interface.
 - [ ] Add media validation requirements (image/video format and size checks).
 - [ ] Add `publo publish instagram --file <path> --media <path>` command path.
 - [ ] Add scheduler integration for Instagram and independent failure handling.
 - [ ] Add platform-specific preflight checks before scheduling.
 
-## Phase 7 - Remote Control (Optional, Local-First Preserved)
+## Phase 10 - Public Distribution (Optional, End-Stage)
 
-- [ ] Add command-ingest interface for remote triggers (Telegram bot or simple HTTP endpoint).
-- [ ] Keep execution on local machine while online service only sends commands.
-- [ ] Add authenticated command queue with replay protection.
-- [ ] Add status callbacks so remote client can see publish result.
-- [ ] Document behavior when local machine is offline.
-
-## Phase 8 - Dashboard (Optional)
-
-- [ ] Expose local API from Rust worker for dashboard consumption.
-- [ ] Build TypeScript dashboard for content list, schedule view, and publish actions.
-- [ ] Add sync view for local file status and job status.
-- [ ] Keep dashboard as interface layer; keep publish logic in Rust core.
-
-## Phase 9 - Public Distribution (Optional, End-Stage)
+Package Publo for external developers with reproducible builds and release hygiene.
 
 - [ ] Build and test release binaries for macOS, Linux, and Windows.
 - [ ] Add release packaging notes for external developers (checksums, naming, changelog).
