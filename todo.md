@@ -77,44 +77,54 @@ Create the persistent operational model for catalog, scheduling, attempts, and s
 - [x] Keep file path + hashes (`file_sha256`, `text_sha256`, `fingerprint`) linked to jobs.
 - [x] Add job metadata for operator attribution (`user|ai`), notes, and tags.
 
-## Phase 5 - Scheduling Core (CLI + Worker)
+## Phase 5 - Scheduling Core (CLI Jobs)
 
-Implement the core scheduling experience and long-running worker process that can reliably publish on time.
+Implement the core scheduling experience in CLI and validate lifecycle/state behavior before worker execution.
 
 - [x] Define schedule input contract (platform(s), time, timezone, file reference, optional note).
 - [x] Add job lifecycle commands (`publo job ready|unready|schedule|unschedule|add-schedule|list|show|cancel|run-debug`).
 - [x] Add schedule-time preflight behavior (auto block with reason on invalid/auth/content checks).
 - [x] Enforce lifecycle behavior in commands (no cancel on `ready`; assign platform at scheduling when missing).
+
+## Phase 6 - Minimal Local GUI (Catalog + Ready + Scheduling)
+
+Add a minimal local GUI to validate the real scheduling workflow before implementing worker publishing.
+
+- [x] Add minimal catalog page to list `.md` files from configured folders.
+- [x] Add collapsible multi-root file tree with persistent panel state (open/closed + width).
+- [ ] Add file detail preview (content/media refs/parsed publish text).
+- [ ] Add Ready page/list showing `ready` jobs.
+- [ ] Add actions from GUI: ready/unready, assign/remove platform, schedule/unschedule/cancel.
+- [ ] Add schedule presets:
+- [ ] today/tomorrow/next-week at 9:00 / 12:00 / 16:00 / 19:00.
+- [ ] +5m / +30m / +1h / +3h.
+- [ ] Wire GUI actions to local backend APIs that reuse core job logic.
+- [ ] Refresh status immediately after actions.
+
+## Phase 7 - Publishing Core (Worker + Attempts)
+
+Implement scheduled execution and attempt tracking on top of existing job lifecycle.
+
 - [ ] Add `publo worker run` long-running process for due jobs.
+- [ ] Add atomic claim flow (`scheduled` -> `publishing`) to avoid duplicate execution.
+- [ ] Execute publish via existing platform adapters.
+- [ ] Write `publish_attempts` rows for every attempt.
+- [ ] Update job status (`published`/`failed`) with reason/error snapshots.
 - [ ] Add retry policy with capped attempts and backoff.
-- [ ] Add dry-run mode for scheduler verification without publishing.
+- [ ] Add dry-run mode for worker verification without posting.
 - [ ] Extend audit logging coverage to scheduled worker attempts and retries.
-- [ ] Add OS integration docs for running worker in background (`launchd`, `systemd`, Task Scheduler).
+- [ ] Add OS integration docs for background service mode (`launchd`, `systemd`, Task Scheduler).
 
-## Phase 6 - Content Catalog (Folder Mode + Readiness)
+## Phase 8 - Advanced Local GUI (List + Calendar + Actions)
 
-Add folder-driven content discovery so users can browse local files, mark them ready, and schedule without moving content into a SaaS editor.
+Expand GUI after worker behavior is available.
 
-- [ ] Add folder roots configuration for catalog scan.
-- [ ] Scan and index `.md` files as `discovered` items.
-- [ ] Track catalog metadata (path, title, modified time, hashes, media refs).
-- [ ] Add readiness commands (`mark-ready`, `mark-unready`) and list/filter views.
-- [ ] Handle file updates, moves, and deletions safely in catalog state.
-- [ ] Prevent scheduling of invalid or unresolved content items.
-
-## Phase 7 - Local GUI (List + Calendar + Actions)
-
-Build a local web UI on top of the same core engine so users can manage pipeline state visually.
-
-- [ ] Expose local API from Rust core for GUI consumption.
-- [ ] Build TypeScript GUI for:
-- [ ] Content catalog browsing (folders/files/readiness).
-- [ ] Schedule list and calendar views.
-- [ ] Job detail view with status timeline and error reason.
-- [ ] Actions: schedule, cancel, retry, publish-now, mark-ready.
+- [ ] Add richer schedule views (list/calendar).
+- [ ] Add job timeline with attempts/errors and retry actions.
+- [ ] Add filters by platform/status/date.
 - [ ] Keep GUI as interface layer; keep publish/schedule logic in Rust core.
 
-## Phase 8 - Remote Worker + Sync (Optional)
+## Phase 9 - Remote Worker + Sync (Optional)
 
 Allow always-on publishing even when laptop is offline by separating authoring location from worker runtime.
 
@@ -125,7 +135,7 @@ Allow always-on publishing even when laptop is offline by separating authoring l
 - [ ] Add result/status sync back to local machine and GUI.
 - [ ] Document offline behavior and recovery guarantees.
 
-## Phase 9 - Platform Expansion (Substack, Instagram)
+## Phase 10 - Platform Expansion (Substack, Instagram)
 
 Expand platform coverage using the same publish pipeline and scheduler architecture.
 
@@ -140,7 +150,7 @@ Expand platform coverage using the same publish pipeline and scheduler architect
 - [ ] Add scheduler integration for Instagram and independent failure handling.
 - [ ] Add platform-specific preflight checks before scheduling.
 
-## Phase 10 - Public Distribution (Optional, End-Stage)
+## Phase 11 - Public Distribution (Optional, End-Stage)
 
 Package Publo for external developers with reproducible builds and release hygiene.
 

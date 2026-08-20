@@ -2,3 +2,4 @@ target/
 .env
 .publo/
 test_files/
+.pnpm-store/

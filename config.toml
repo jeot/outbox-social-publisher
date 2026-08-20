@@ -8,6 +8,12 @@ request_seconds = 30
 [db]
 path = ".publo/workspace/default/publo.db"
 
+[catalog]
+roots = [
+  "/Users/shk/work/awesome/The Future Product Engineer/💃🏼 Short Form Contents",
+  "/Users/shk/work/publo.so/test_files",
+]
+
 [signature]
 enabled = true
 text = "\n[Sent from publo, by shk]"
