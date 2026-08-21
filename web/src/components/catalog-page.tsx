@@ -18,6 +18,10 @@ export function CatalogPage() {
   )
 
   const selectedFilePath = useCatalogStore((state) => state.selectedFilePath)
+  const selectedFileReady = useCatalogStore((state) => state.selectedFileReady)
+  const readyActionLoading = useCatalogStore((state) => state.readyActionLoading)
+  const markSelectedReady = useCatalogStore((state) => state.markSelectedReady)
+  const unmarkSelectedReady = useCatalogStore((state) => state.unmarkSelectedReady)
   const selectedFileContent = useCatalogStore((state) => state.selectedFileContent)
   const selectedPublishText = useCatalogStore((state) => state.selectedPublishText)
   const selectedPreviewMedia = useCatalogStore((state) => state.selectedPreviewMedia)
@@ -66,6 +70,15 @@ export function CatalogPage() {
         <PreviewCard
           selectedFilePath={selectedFilePath}
           selectedPreviewPublishable={selectedPreviewPublishable}
+          selectedFileReady={selectedFileReady}
+          readyActionLoading={readyActionLoading}
+          onToggleReady={() => {
+            if (selectedFileReady) {
+              void unmarkSelectedReady()
+              return
+            }
+            void markSelectedReady()
+          }}
           selectedFileLoading={selectedFileLoading}
           selectedFileError={selectedFileError}
           selectedPublishText={selectedPublishText}
@@ -117,6 +130,7 @@ export function CatalogPage() {
 
         <RawFileCard
           selectedFilePath={selectedFilePath}
+          selectedFileReady={selectedFileReady}
           selectedFileLoading={selectedFileLoading}
           selectedFileError={selectedFileError}
           selectedFileContent={selectedFileContent}

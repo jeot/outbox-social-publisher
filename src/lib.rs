@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -37,16 +38,11 @@ mod jobs;
 mod publish;
 mod util;
 
-const DATA_DIR: &str = ".publo";
-const OAUTH_STATE_PATH: &str = ".publo/linkedin_oauth_state";
-const X_OAUTH_STATE_PATH: &str = ".publo/x_oauth_state";
-const PUBLISH_LOG_PATH: &str = ".publo/publish-log.jsonl";
-const ENV_PATH: &str = ".env";
 const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read media.write offline.access";
 
 use auth::{env_non_empty, load_linkedin_auth, load_x_auth};
 use cli::*;
-use config::{RuntimeConfig, load_config, resolve_project_file};
+use config::{RuntimeConfig, load_config};
 use db::{ensure_db_ready, open_db};
 use errors::AppError;
 use util::json::print_json;
@@ -253,17 +249,35 @@ struct LinkedinOAuthCallbackState {
 }
 
 pub async fn run() -> ExitCode {
-    if let Some(env_path) = resolve_project_file(ENV_PATH) {
-        let _ = dotenvy::from_filename_override(env_path);
-    }
-    let config = load_config();
-    if let Err(err) = ensure_db_ready(&config) {
-        print_json(&err.to_output(), config.pretty_json);
-        return ExitCode::from(err.exit_code());
-    }
     let cli = Cli::parse();
+    if let Commands::Init(args) = cli.command {
+        match run_init(args) {
+            Ok(value) => {
+                print_json(&value, true);
+                return ExitCode::from(0);
+            }
+            Err(err) => {
+                print_json(&err.to_output(), true);
+                return ExitCode::from(err.exit_code());
+            }
+        }
+    }
+
+    let config = load_config();
+    let _ = dotenvy::from_filename_override(&config.paths.env_path);
+    let requires_db = matches!(&cli.command, Commands::Job(_) | Commands::Serve(_));
+    if requires_db {
+        if let Err(err) = ensure_db_ready(&config) {
+            print_json(&err.to_output(), config.pretty_json);
+            return ExitCode::from(err.exit_code());
+        }
+    }
 
     if let Commands::Serve(args) = cli.command {
+        if let Err(err) = validate_serve_requirements(&config) {
+            print_json(&err.to_output(), config.pretty_json);
+            return ExitCode::from(err.exit_code());
+        }
         let host = args.host.unwrap_or_else(|| config.api_host.clone());
         let port = args.port.unwrap_or(config.api_port);
         return api::run_server(
@@ -271,12 +285,18 @@ pub async fn run() -> ExitCode {
             port,
             config.catalog_roots.clone(),
             config.media_lookup_paths.clone(),
+            config.db_path.clone(),
             config.pretty_json,
         )
         .await;
     }
 
     let result: Result<Value, AppError> = match cli.command {
+        Commands::Paths => show_paths(&config),
+        Commands::Init(_) => unreachable!("init command handled before runtime config load"),
+        Commands::Workspace(workspace) => match workspace.command {
+            WorkspaceCommand::Switch(args) => workspace_switch(args),
+        },
         Commands::Publish(publish) => match publish.platform {
             PublishPlatform::Linkedin(args) => publish_linkedin(args, &config).await,
             PublishPlatform::X(args) => publish_x(args, &config).await,
@@ -325,6 +345,359 @@ pub async fn run() -> ExitCode {
 
 fn now_rfc3339_utc() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn validate_serve_requirements(config: &RuntimeConfig) -> Result<(), AppError> {
+    if !config.paths.global_config_path.exists() {
+        return Err(AppError::Validation {
+            message: format!(
+                "Global config not found: {}",
+                config.paths.global_config_path.display()
+            ),
+            suggestion: Some("Run `publo init` to create required files.".to_string()),
+            command: Some("publo init".to_string()),
+        });
+    }
+
+    if !config.paths.workspace_config_path.exists() {
+        return Err(AppError::Validation {
+            message: format!(
+                "Workspace config not found for workspace '{}': {}",
+                config.paths.workspace_id,
+                config.paths.workspace_config_path.display()
+            ),
+            suggestion: Some("Run `publo init` to create required files.".to_string()),
+            command: Some("publo init --workspace-id <id> --display-name \"My Workspace\"".to_string()),
+        });
+    }
+
+    if config.catalog_roots.is_empty() {
+        return Err(AppError::Validation {
+            message: "No catalog roots configured.".to_string(),
+            suggestion: Some(
+                "Set [catalog].roots in workspace config.toml, then retry serve."
+                    .to_string(),
+            ),
+            command: Some("publo paths".to_string()),
+        });
+    }
+
+    for root in &config.catalog_roots {
+        if !root.exists() {
+            return Err(AppError::Validation {
+                message: format!("Catalog root does not exist: {}", root.display()),
+                suggestion: Some(
+                    "Fix [catalog].roots paths in workspace config.toml and retry."
+                        .to_string(),
+                ),
+                command: Some("publo paths".to_string()),
+            });
+        }
+        if !root.is_dir() {
+            return Err(AppError::Validation {
+                message: format!("Catalog root is not a directory: {}", root.display()),
+                suggestion: Some(
+                    "Use directory paths in [catalog].roots and retry.".to_string(),
+                ),
+                command: Some("publo paths".to_string()),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn show_paths(config: &RuntimeConfig) -> Result<Value, AppError> {
+    Ok(json!({
+        "ok": true,
+        "mode": "paths",
+        "publo_home": config.paths.publo_home.display().to_string(),
+        "global_config_path": config.paths.global_config_path.display().to_string(),
+        "global_config_exists": config.paths.global_config_path.exists(),
+        "workspace_id": config.paths.workspace_id,
+        "workspace_display_name": config.workspace_display_name,
+        "workspace_config_path": config.paths.workspace_config_path.display().to_string(),
+        "workspace_config_exists": config.paths.workspace_config_path.exists(),
+        "env_path": config.paths.env_path.display().to_string(),
+        "env_exists": config.paths.env_path.exists(),
+        "runtime_dir": config.paths.runtime_dir.display().to_string(),
+        "workspace_dir": config.paths.workspace_dir.display().to_string(),
+        "db_path": config.db_path.display().to_string(),
+        "publish_log_path": config.paths.publish_log_path.display().to_string(),
+        "linkedin_oauth_state_path": config.paths.linkedin_oauth_state_path.display().to_string(),
+        "x_oauth_state_path": config.paths.x_oauth_state_path.display().to_string()
+    }))
+}
+
+fn run_init(args: InitArgs) -> Result<Value, AppError> {
+    let default_workspace_id = config::resolve_runtime_paths().workspace_id;
+    let default_display_name = config::default_workspace_display_name(&default_workspace_id);
+
+    let selected_display_name = if let Some(value) = args.display_name {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            default_display_name.clone()
+        } else {
+            trimmed
+        }
+    } else {
+        prompt_workspace_display_name(&default_display_name)?
+    };
+
+    let selected_workspace_id = if let Some(value) = args.workspace_id {
+        config::normalize_workspace_id(&value)
+    } else {
+        config::normalize_workspace_id(&selected_display_name)
+    };
+
+    let paths = config::resolve_runtime_paths_for_workspace(&selected_workspace_id);
+    let mut steps: Vec<Value> = Vec::new();
+
+    ensure_dir_step(&paths.publo_home, "publo_home", &mut steps)?;
+    ensure_file_step(
+        &paths.global_config_path,
+        &global_config_template(&paths.workspace_id),
+        "global_config",
+        &mut steps,
+    )?;
+    ensure_dir_step(&paths.workspace_dir, "workspace_dir", &mut steps)?;
+    ensure_file_step(
+        &paths.workspace_config_path,
+        &workspace_config_template(&selected_display_name),
+        "workspace_config",
+        &mut steps,
+    )?;
+    ensure_file_step(
+        &paths.workspace_dir.join(".env.example"),
+        &workspace_env_example_template(),
+        "workspace_env_example",
+        &mut steps,
+    )?;
+    ensure_file_step(
+        &paths.env_path,
+        &workspace_env_template(),
+        "workspace_env",
+        &mut steps,
+    )?;
+    ensure_dir_step(&paths.runtime_dir, "workspace_runtime_dir", &mut steps)?;
+
+    Ok(json!({
+        "ok": true,
+        "mode": "init",
+        "workspace_id": paths.workspace_id,
+        "workspace_display_name": selected_display_name,
+        "publo_home": paths.publo_home.display().to_string(),
+        "global_config_path": paths.global_config_path.display().to_string(),
+        "workspace_dir": paths.workspace_dir.display().to_string(),
+        "workspace_config_path": paths.workspace_config_path.display().to_string(),
+        "env_path": paths.env_path.display().to_string(),
+        "steps": steps,
+        "note": "Existing files were left untouched."
+    }))
+}
+
+fn workspace_switch(args: WorkspaceSwitchArgs) -> Result<Value, AppError> {
+    let workspace_id = config::normalize_workspace_id(&args.workspace_id);
+    let paths = config::resolve_runtime_paths_for_workspace(&workspace_id);
+
+    if !paths.workspace_config_path.exists() {
+        return Err(AppError::Validation {
+            message: format!(
+                "Workspace '{}' does not exist. Expected config at {}",
+                workspace_id,
+                paths.workspace_config_path.display()
+            ),
+            suggestion: Some(
+                "Create it first with `publo init --workspace-id <id> --display-name \"Name\"`."
+                    .to_string(),
+            ),
+            command: Some(
+                "publo init --workspace-id <id> --display-name \"Name\"".to_string(),
+            ),
+        });
+    }
+
+    let global_config_path = paths.global_config_path.clone();
+    if !global_config_path.exists() {
+        return Err(AppError::Validation {
+            message: format!(
+                "Global config not found: {}",
+                global_config_path.display()
+            ),
+            suggestion: Some("Run `publo init` first.".to_string()),
+            command: Some("publo init".to_string()),
+        });
+    }
+
+    let current_raw = fs::read_to_string(&global_config_path).map_err(|err| AppError::Io {
+        message: format!(
+            "Failed to read global config '{}': {err}",
+            global_config_path.display()
+        ),
+    })?;
+    let updated = set_default_workspace_in_global_config(&current_raw, &workspace_id);
+    fs::write(&global_config_path, updated).map_err(|err| AppError::Io {
+        message: format!(
+            "Failed to update global config '{}': {err}",
+            global_config_path.display()
+        ),
+    })?;
+
+    Ok(json!({
+        "ok": true,
+        "mode": "workspace_switch",
+        "workspace_id": workspace_id,
+        "global_config_path": global_config_path.display().to_string(),
+        "note": "Default workspace updated."
+    }))
+}
+
+fn prompt_workspace_display_name(default_workspace_display_name: &str) -> Result<String, AppError> {
+    print!(
+        "Workspace display name [{}]: ",
+        default_workspace_display_name
+    );
+    io::stdout().flush().map_err(|err| AppError::Io {
+        message: format!("Failed to flush stdout for workspace prompt: {err}"),
+    })?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).map_err(|err| AppError::Io {
+        message: format!("Failed to read workspace name from stdin: {err}"),
+    })?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(default_workspace_display_name.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn ensure_dir_step(path: &PathBuf, key: &str, steps: &mut Vec<Value>) -> Result<(), AppError> {
+    if path.exists() {
+        steps.push(json!({
+            "key": key,
+            "path": path.display().to_string(),
+            "status": "exists",
+            "touched": false
+        }));
+        return Ok(());
+    }
+    fs::create_dir_all(path).map_err(|err| AppError::Io {
+        message: format!("Failed to create directory '{}': {err}", path.display()),
+    })?;
+    steps.push(json!({
+        "key": key,
+        "path": path.display().to_string(),
+        "status": "created",
+        "touched": true
+    }));
+    Ok(())
+}
+
+fn ensure_file_step(path: &PathBuf, content: &str, key: &str, steps: &mut Vec<Value>) -> Result<(), AppError> {
+    if path.exists() {
+        steps.push(json!({
+            "key": key,
+            "path": path.display().to_string(),
+            "status": "exists",
+            "touched": false
+        }));
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::Io {
+            message: format!("Failed to create directory '{}': {err}", parent.display()),
+        })?;
+    }
+
+    fs::write(path, content).map_err(|err| AppError::Io {
+        message: format!("Failed to create file '{}': {err}", path.display()),
+    })?;
+    steps.push(json!({
+        "key": key,
+        "path": path.display().to_string(),
+        "status": "created",
+        "touched": true
+    }));
+    Ok(())
+}
+
+fn global_config_template(default_workspace_id: &str) -> String {
+    let base = include_str!("../.publo.so.example/config.toml").to_string();
+    if default_workspace_id == "default" {
+        return base;
+    }
+    base.replace(
+        "default = \"default\"",
+        &format!("default = \"{}\"", default_workspace_id),
+    )
+}
+
+fn workspace_config_template(display_name: &str) -> String {
+    let base = include_str!("../.publo.so.example/workspaces/default/config.toml").to_string();
+    base.replace(
+        "display_name = \"Default\"",
+        &format!("display_name = \"{}\"", display_name.replace('"', "\\\"")),
+    )
+}
+
+fn workspace_env_example_template() -> String {
+    include_str!("../.publo.so.example/workspaces/default/.env.example").to_string()
+}
+
+fn workspace_env_template() -> String {
+    workspace_env_example_template()
+}
+
+fn set_default_workspace_in_global_config(raw: &str, workspace_id: &str) -> String {
+    let mut lines: Vec<String> = raw.lines().map(|s| s.to_string()).collect();
+    let mut workspace_header_idx: Option<usize> = None;
+    let mut default_idx: Option<usize> = None;
+    let mut workspace_section_end = lines.len();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed == "[workspace]" {
+            workspace_header_idx = Some(idx);
+            workspace_section_end = lines.len();
+            for (next_idx, next_line) in lines.iter().enumerate().skip(idx + 1) {
+                let next_trimmed = next_line.trim();
+                if next_trimmed.starts_with('[') && next_trimmed.ends_with(']') {
+                    workspace_section_end = next_idx;
+                    break;
+                }
+                if next_trimmed.starts_with("default") && next_trimmed.contains('=') {
+                    default_idx = Some(next_idx);
+                }
+            }
+            break;
+        }
+    }
+
+    let new_default_line = format!("default = \"{}\"", workspace_id);
+    match (workspace_header_idx, default_idx) {
+        (Some(_), Some(idx)) => {
+            lines[idx] = new_default_line;
+        }
+        (Some(header_idx), None) => {
+            let insert_at = (header_idx + 1).min(workspace_section_end);
+            lines.insert(insert_at, new_default_line);
+        }
+        (None, _) => {
+            if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("[workspace]".to_string());
+            lines.push(new_default_line);
+        }
+    }
+
+    let mut out = lines.join("\n");
+    if raw.ends_with('\n') || out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 fn generate_id() -> String {
@@ -2856,7 +3229,8 @@ fn find_existing_publish(
     author_urn: &str,
     fingerprint: &str,
 ) -> Result<Option<PublishLogEntry>, AppError> {
-    let Ok(raw) = fs::read_to_string(PUBLISH_LOG_PATH) else {
+    let publish_log_path = config::resolve_runtime_paths().publish_log_path;
+    let Ok(raw) = fs::read_to_string(&publish_log_path) else {
         return Ok(None);
     };
     for line in raw.lines().rev() {
@@ -2877,9 +3251,15 @@ fn find_existing_publish(
 }
 
 fn append_publish_log(entry: &PublishLogEntry) -> Result<(), AppError> {
-    fs::create_dir_all(DATA_DIR).map_err(|err| AppError::Io {
-        message: format!("Failed to create {DATA_DIR} directory: {err}"),
-    })?;
+    let paths = config::resolve_runtime_paths();
+    if let Some(parent) = paths.publish_log_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::Io {
+            message: format!(
+                "Failed to create publish log directory '{}': {err}",
+                parent.display()
+            ),
+        })?;
+    }
     let line = serde_json::to_string(entry).map_err(|err| AppError::Io {
         message: format!("Failed to encode publish log entry: {err}"),
     })?;
@@ -2887,7 +3267,7 @@ fn append_publish_log(entry: &PublishLogEntry) -> Result<(), AppError> {
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(PUBLISH_LOG_PATH)
+        .open(&paths.publish_log_path)
         .map_err(|err| AppError::Io {
             message: format!("Failed to open publish log: {err}"),
         })?;
@@ -3202,31 +3582,44 @@ fn pkce_code_challenge(code_verifier: &str) -> String {
 }
 
 fn save_oauth_state(state: &OAuthState) -> Result<(), AppError> {
-    fs::create_dir_all(DATA_DIR).map_err(|err| AppError::Io {
-        message: format!("Failed to create {DATA_DIR} directory: {err}"),
-    })?;
+    let paths = config::resolve_runtime_paths();
+    if let Some(parent) = paths.linkedin_oauth_state_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::Io {
+            message: format!(
+                "Failed to create OAuth state directory '{}': {err}",
+                parent.display()
+            ),
+        })?;
+    }
     let raw = serde_json::to_string(state).map_err(|err| AppError::Io {
         message: format!("Failed to encode OAuth state: {err}"),
     })?;
-    fs::write(OAUTH_STATE_PATH, raw).map_err(|err| AppError::Io {
+    fs::write(&paths.linkedin_oauth_state_path, raw).map_err(|err| AppError::Io {
         message: format!("Failed to write OAuth state file: {err}"),
     })
 }
 
 fn save_x_oauth_state(state: &XOAuthState) -> Result<(), AppError> {
-    fs::create_dir_all(DATA_DIR).map_err(|err| AppError::Io {
-        message: format!("Failed to create {DATA_DIR} directory: {err}"),
-    })?;
+    let paths = config::resolve_runtime_paths();
+    if let Some(parent) = paths.x_oauth_state_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::Io {
+            message: format!(
+                "Failed to create X OAuth state directory '{}': {err}",
+                parent.display()
+            ),
+        })?;
+    }
     let raw = serde_json::to_string(state).map_err(|err| AppError::Io {
         message: format!("Failed to encode X OAuth state: {err}"),
     })?;
-    fs::write(X_OAUTH_STATE_PATH, raw).map_err(|err| AppError::Io {
+    fs::write(&paths.x_oauth_state_path, raw).map_err(|err| AppError::Io {
         message: format!("Failed to write X OAuth state file: {err}"),
     })
 }
 
 fn load_x_oauth_state() -> Result<XOAuthState, AppError> {
-    let raw = fs::read_to_string(X_OAUTH_STATE_PATH).map_err(|_| AppError::Validation {
+    let paths = config::resolve_runtime_paths();
+    let raw = fs::read_to_string(&paths.x_oauth_state_path).map_err(|_| AppError::Validation {
         message: "X OAuth state file not found.".to_string(),
         suggestion: Some(
             "Run publo auth x login first, or pass --code-verifier to auth x exchange."
@@ -3240,11 +3633,14 @@ fn load_x_oauth_state() -> Result<XOAuthState, AppError> {
 }
 
 fn clear_x_oauth_state_file() {
-    let _ = fs::remove_file(X_OAUTH_STATE_PATH);
+    let path = config::resolve_runtime_paths().x_oauth_state_path;
+    let _ = fs::remove_file(path);
 }
 
 fn validate_oauth_state(input_state: &str) -> Result<(), AppError> {
-    let raw = fs::read_to_string(OAUTH_STATE_PATH).map_err(|_| AppError::Validation {
+    let paths = config::resolve_runtime_paths();
+    let raw =
+        fs::read_to_string(&paths.linkedin_oauth_state_path).map_err(|_| AppError::Validation {
         message: "OAuth state file not found. Start login again.".to_string(),
         suggestion: Some("Run publo auth linkedin login, then retry exchange with returned state.".to_string()),
         command: Some("publo auth linkedin login".to_string()),
@@ -3263,11 +3659,13 @@ fn validate_oauth_state(input_state: &str) -> Result<(), AppError> {
 }
 
 fn clear_oauth_state_file() {
-    let _ = fs::remove_file(OAUTH_STATE_PATH);
+    let path = config::resolve_runtime_paths().linkedin_oauth_state_path;
+    let _ = fs::remove_file(path);
 }
 
 fn upsert_env_value(key: &str, value: &str) -> Result<(), AppError> {
-    let mut lines = if let Ok(raw) = fs::read_to_string(ENV_PATH) {
+    let env_path = config::resolve_runtime_paths().env_path;
+    let mut lines = if let Ok(raw) = fs::read_to_string(&env_path) {
         raw.lines().map(|s| s.to_string()).collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -3297,7 +3695,13 @@ fn upsert_env_value(key: &str, value: &str) -> Result<(), AppError> {
         format!("{}\n", lines.join("\n"))
     };
 
-    fs::write(ENV_PATH, output).map_err(|err| AppError::Io {
+    if let Some(parent) = env_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::Io {
+            message: format!("Failed to create .env directory '{}': {err}", parent.display()),
+        })?;
+    }
+
+    fs::write(&env_path, output).map_err(|err| AppError::Io {
         message: format!("Failed to write .env: {err}"),
     })
 }

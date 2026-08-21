@@ -85,6 +85,9 @@ Implement the core scheduling experience in CLI and validate lifecycle/state beh
 - [x] Add job lifecycle commands (`publo job ready|unready|schedule|unschedule|add-schedule|list|show|cancel|run-debug`).
 - [x] Add schedule-time preflight behavior (auto block with reason on invalid/auth/content checks).
 - [x] Enforce lifecycle behavior in commands (no cancel on `ready`; assign platform at scheduling when missing).
+- [x] Add workspace bootstrap + switching flow (`publo init`, `publo workspace switch`).
+- [x] Separate workspace identity model (`workspace_id`) from display name (`workspace.display_name`).
+- [x] Add getting-started + platform setup docs for first-time users.
 
 ## Phase 6 - Minimal Local GUI (Catalog + Ready + Scheduling)
 
@@ -92,7 +95,11 @@ Add a minimal local GUI to validate the real scheduling workflow before implemen
 
 - [x] Add minimal catalog page to list `.md` files from configured folders.
 - [x] Add collapsible multi-root file tree with persistent panel state (open/closed + width).
-- [ ] Add file detail preview (content/media refs/parsed publish text).
+- [x] Add file detail preview (content/media refs/parsed publish text).
+- [x] Persist selected file on refresh.
+- [x] Show ready counts on folder/root nodes.
+- [x] Show AI-ready file badge variant (`Ready` + AI icon).
+- [x] Return file-level jobs array in catalog file API (`jobs: []` for selected file).
 - [ ] Add Ready page/list showing `ready` jobs.
 - [ ] Add actions from GUI: ready/unready, assign/remove platform, schedule/unschedule/cancel.
 - [ ] Add schedule presets:
@@ -100,6 +107,7 @@ Add a minimal local GUI to validate the real scheduling workflow before implemen
 - [ ] +5m / +30m / +1h / +3h.
 - [ ] Wire GUI actions to local backend APIs that reuse core job logic.
 - [ ] Refresh status immediately after actions.
+- [ ] Add production UI serving mode from backend (`publo serve` serves `web/dist` + API).
 
 ## Phase 7 - Publishing Core (Worker + Attempts)
 

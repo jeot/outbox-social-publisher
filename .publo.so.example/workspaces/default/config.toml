@@ -1,0 +1,21 @@
+[workspace]
+display_name = "Default"
+
+[db]
+path = "publo.db"
+
+[catalog]
+roots = []
+
+[signature]
+enabled = false
+text = "\n[Sent by publo.so]"
+
+[platform.linkedin.signature]
+enabled = false
+
+[platform.x.signature]
+enabled = false
+
+[media]
+lookup_paths = []

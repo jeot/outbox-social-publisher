@@ -1,0 +1,13 @@
+[workspace]
+default = "default"
+
+[output]
+pretty_json = true
+
+[timeouts]
+connect_seconds = 10
+request_seconds = 30
+
+[api]
+host = "127.0.0.1"
+port = 8787

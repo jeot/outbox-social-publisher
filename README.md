@@ -4,6 +4,11 @@ Your personal publishing pipeline.
 Your content stays local. Publo takes it from there.
 
 Vision and direction: [vision.md](vision.md)
+Quick setup guide: [GETTING_STARTED.md](GETTING_STARTED.md)
+Platform setup guides:
+
+- [docs/platforms/linkedin-setup.md](docs/platforms/linkedin-setup.md)
+- [docs/platforms/x-setup.md](docs/platforms/x-setup.md)
 
 ## Current status
 

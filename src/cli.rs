@@ -15,7 +15,18 @@ pub(crate) enum Commands {
     Publish(PublishArgs),
     Auth(AuthArgs),
     Job(JobArgs),
+    Init(InitArgs),
+    Workspace(WorkspaceArgs),
+    Paths,
     Serve(ServeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct InitArgs {
+    #[arg(long)]
+    pub(crate) workspace_id: Option<String>,
+    #[arg(long)]
+    pub(crate) display_name: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -24,6 +35,23 @@ pub(crate) struct ServeArgs {
     pub(crate) host: Option<String>,
     #[arg(long)]
     pub(crate) port: Option<u16>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceArgs {
+    #[command(subcommand)]
+    pub(crate) command: WorkspaceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    Switch(WorkspaceSwitchArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceSwitchArgs {
+    #[arg(long)]
+    pub(crate) workspace_id: String,
 }
 
 #[derive(Debug, Args)]

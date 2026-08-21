@@ -19,7 +19,7 @@ export function AppHeader({
   return (
     <header className="flex h-14 shrink-0 items-center gap-2 border-b bg-background px-4">
       <SidebarTrigger />
-      <Separator orientation="vertical" className="h-4" />
+      <Separator orientation="vertical" className="" />
       <h1 className="text-base font-bold tracking-tight">{title}</h1>
       {showRightPanelToggle ? (
         <>
