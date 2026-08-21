@@ -14,12 +14,24 @@ export type CatalogRoot = {
   error?: string
 }
 
+export type MediaPreview = {
+  reference: string
+  resolved_path: string | null
+  exists: boolean
+  valid_extension: boolean
+  error: string | null
+}
+
 type CatalogState = {
   roots: CatalogRoot[]
   loading: boolean
   error: string | null
   selectedFilePath: string | null
   selectedFileContent: string
+  selectedPublishText: string
+  selectedPreviewMedia: MediaPreview[]
+  selectedPreviewIssues: string[]
+  selectedPreviewPublishable: boolean
   selectedFileLoading: boolean
   selectedFileError: string | null
   loadCatalog: () => Promise<void>
@@ -32,6 +44,10 @@ export const useCatalogStore = create<CatalogState>((set) => ({
   error: null,
   selectedFilePath: null,
   selectedFileContent: "",
+  selectedPublishText: "",
+  selectedPreviewMedia: [],
+  selectedPreviewIssues: [],
+  selectedPreviewPublishable: false,
   selectedFileLoading: false,
   selectedFileError: null,
   loadCatalog: async () => {
@@ -79,29 +95,40 @@ export const useCatalogStore = create<CatalogState>((set) => ({
       selectedFileLoading: true,
       selectedFileError: null,
       selectedFileContent: "",
+      selectedPublishText: "",
+      selectedPreviewMedia: [],
+      selectedPreviewIssues: [],
+      selectedPreviewPublishable: false,
     })
     try {
-      const response = await fetch(`/api/catalog/file?path=${encodeURIComponent(path)}`)
-      const raw = await response.text()
-      let data: any = null
-      if (raw.trim().length > 0) {
-        try {
-          data = JSON.parse(raw)
-        } catch {
-          throw new Error(
-            `catalog file API returned non-JSON response (status ${response.status})`
-          )
-        }
-      }
-      if (!data) {
-        throw new Error(`catalog file API returned empty response (status ${response.status})`)
-      }
-      if (!response.ok || !data?.ok) {
+      const [fileResponse, previewResponse] = await Promise.all([
+        fetch(`/api/catalog/file?path=${encodeURIComponent(path)}`),
+        fetch(`/api/catalog/preview?path=${encodeURIComponent(path)}`),
+      ])
+
+      const fileRaw = await fileResponse.text()
+      const previewRaw = await previewResponse.text()
+      const data = parseApiResponse(fileResponse.status, fileRaw, "catalog file API")
+      const previewData = parseApiResponse(
+        previewResponse.status,
+        previewRaw,
+        "catalog preview API"
+      )
+      if (!fileResponse.ok || !data?.ok) {
         throw new Error(data?.message ?? "failed to load file")
       }
+      if (!previewResponse.ok || !previewData?.ok) {
+        throw new Error(previewData?.message ?? "failed to load preview")
+      }
+
+      const preview = previewData?.preview ?? {}
       set({
         selectedFilePath: data.path ?? path,
         selectedFileContent: data.content ?? "",
+        selectedPublishText: preview.publish_text ?? "",
+        selectedPreviewMedia: preview.media ?? [],
+        selectedPreviewIssues: preview.issues ?? [],
+        selectedPreviewPublishable: Boolean(preview.publishable),
         selectedFileLoading: false,
         selectedFileError: null,
       })
@@ -109,9 +136,28 @@ export const useCatalogStore = create<CatalogState>((set) => ({
       set({
         selectedFilePath: path,
         selectedFileContent: "",
+        selectedPublishText: "",
+        selectedPreviewMedia: [],
+        selectedPreviewIssues: [],
+        selectedPreviewPublishable: false,
         selectedFileLoading: false,
         selectedFileError: err instanceof Error ? err.message : "unknown error",
       })
     }
   },
 }))
+
+function parseApiResponse(status: number, raw: string, label: string): any {
+  let data: any = null
+  if (raw.trim().length > 0) {
+    try {
+      data = JSON.parse(raw)
+    } catch {
+      throw new Error(`${label} returned non-JSON response (status ${status})`)
+    }
+  }
+  if (!data) {
+    throw new Error(`${label} returned empty response (status ${status})`)
+  }
+  return data
+}

@@ -1,196 +1,109 @@
 import * as React from "react"
-
+import {
+  CalendarClock,
+  CheckCheck,
+  FileText,
+  FolderKanban,
+  Settings2,
+  Sparkles,
+} from "lucide-react"
+import { NavUser } from "@/components/nav-user"
+import { TeamSwitcher } from "@/components/team-switcher"
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
+  SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
-  SidebarRail,
 } from "@/components/ui/sidebar"
 
-// This is sample data.
-const data = {
-  navMain: [
-    {
-      title: "Getting Started",
-      url: "#",
-      items: [
-        {
-          title: "Installation",
-          url: "#",
-        },
-        {
-          title: "Project Structure",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "Build Your Application",
-      url: "#",
-      items: [
-        {
-          title: "Routing",
-          url: "#",
-        },
-        {
-          title: "Data Fetching",
-          url: "#",
-          isActive: true,
-        },
-        {
-          title: "Rendering",
-          url: "#",
-        },
-        {
-          title: "Caching",
-          url: "#",
-        },
-        {
-          title: "Styling",
-          url: "#",
-        },
-        {
-          title: "Optimizing",
-          url: "#",
-        },
-        {
-          title: "Configuring",
-          url: "#",
-        },
-        {
-          title: "Testing",
-          url: "#",
-        },
-        {
-          title: "Authentication",
-          url: "#",
-        },
-        {
-          title: "Deploying",
-          url: "#",
-        },
-        {
-          title: "Upgrading",
-          url: "#",
-        },
-        {
-          title: "Examples",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "API Reference",
-      url: "#",
-      items: [
-        {
-          title: "Components",
-          url: "#",
-        },
-        {
-          title: "File Conventions",
-          url: "#",
-        },
-        {
-          title: "Functions",
-          url: "#",
-        },
-        {
-          title: "next.config.js Options",
-          url: "#",
-        },
-        {
-          title: "CLI",
-          url: "#",
-        },
-        {
-          title: "Edge Runtime",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "Architecture",
-      url: "#",
-      items: [
-        {
-          title: "Accessibility",
-          url: "#",
-        },
-        {
-          title: "Fast Refresh",
-          url: "#",
-        },
-        {
-          title: "Next.js Compiler",
-          url: "#",
-        },
-        {
-          title: "Supported Browsers",
-          url: "#",
-        },
-        {
-          title: "Turbopack",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "Community",
-      url: "#",
-      items: [
-        {
-          title: "Contribution Guide",
-          url: "#",
-        },
-      ],
-    },
-  ],
+export type AppPage = "catalog" | "ready" | "scheduled"
+
+const teams = [
+  { name: "Publo", logo: <Sparkles className="size-4" />, plan: "Local mode" },
+]
+
+const pages: { key: AppPage; label: string; icon: React.ReactNode }[] = [
+  { key: "catalog", label: "Catalog", icon: <FolderKanban /> },
+  { key: "ready", label: "Ready", icon: <CheckCheck /> },
+  { key: "scheduled", label: "Scheduled", icon: <CalendarClock /> },
+]
+
+type AppSidebarProps = React.ComponentProps<typeof Sidebar> & {
+  activePage: AppPage
+  onPageChange: (page: AppPage) => void
 }
-export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+
+export function AppSidebar({
+  activePage,
+  onPageChange,
+  ...props
+}: AppSidebarProps) {
   return (
-    <Sidebar {...props}>
+    <Sidebar collapsible="icon" variant="inset" {...props}>
+      <SidebarHeader>
+        <TeamSwitcher teams={teams} />
+      </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Table of Contents</SidebarGroupLabel>
+          <SidebarGroupLabel>Pipeline</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {data.navMain.map((item) => (
-                <SidebarMenuItem key={item.title}>
+              {pages.map((page) => (
+                <SidebarMenuItem key={page.key}>
                   <SidebarMenuButton
-                    render={<a href={item.url} className="font-medium" />}
+                    isActive={activePage === page.key}
+                    tooltip={page.label}
+                    render={
+                      <button
+                        type="button"
+                        onClick={() => onPageChange(page.key)}
+                      />
+                    }
                   >
-                    {item.title}
+                    {page.icon}
+                    <span>{page.label}</span>
                   </SidebarMenuButton>
-                  {item.items?.length ? (
-                    <SidebarMenuSub>
-                      {item.items.map((item) => (
-                        <SidebarMenuSubItem key={item.title}>
-                          <SidebarMenuSubButton
-                            isActive={item.isActive}
-                            render={<a href={item.url} />}
-                          >
-                            {item.title}
-                          </SidebarMenuSubButton>
-                        </SidebarMenuSubItem>
-                      ))}
-                    </SidebarMenuSub>
-                  ) : null}
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        <SidebarGroup className="mt-auto">
+          <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton tooltip="Files">
+                  <FileText />
+                  <span>Files</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton tooltip="Settings">
+                  <Settings2 />
+                  <span>Settings</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
       </SidebarContent>
-      <SidebarRail />
+      <SidebarFooter>
+        <NavUser
+          user={{
+            name: "Local User",
+            email: "you@localhost",
+            avatar: "/favicon.svg",
+          }}
+        />
+      </SidebarFooter>
     </Sidebar>
   )
 }

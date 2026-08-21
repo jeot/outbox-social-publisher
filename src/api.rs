@@ -9,9 +9,12 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::publish;
+
 #[derive(Clone)]
 struct ApiState {
     catalog_roots: Arc<Vec<PathBuf>>,
+    media_lookup_paths: Arc<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,16 +44,19 @@ pub async fn run_server(
     host: String,
     port: u16,
     catalog_roots: Vec<PathBuf>,
+    media_lookup_paths: Vec<PathBuf>,
     pretty_json: bool,
 ) -> ExitCode {
     let state = ApiState {
         catalog_roots: Arc::new(catalog_roots),
+        media_lookup_paths: Arc::new(media_lookup_paths),
     };
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/catalog/tree", get(catalog_tree))
         .route("/api/catalog/file", get(catalog_file))
+        .route("/api/catalog/preview", get(catalog_preview))
         .with_state(state);
 
     let bind_addr = format!("{host}:{port}");
@@ -114,29 +120,10 @@ async fn catalog_tree(State(state): State<ApiState>) -> Json<Value> {
 
 async fn catalog_file(State(state): State<ApiState>, Query(query): Query<FileQuery>) -> Json<Value> {
     let requested = PathBuf::from(&query.path);
-    if !requested.is_absolute() {
+    if !is_valid_markdown_request(&requested, state.catalog_roots.as_slice()) {
         return Json(json!({
             "ok": false,
-            "message": "Path must be absolute."
-        }));
-    }
-
-    if !is_path_within_roots(&requested, state.catalog_roots.as_slice()) {
-        return Json(json!({
-            "ok": false,
-            "message": "Path is outside configured catalog roots."
-        }));
-    }
-
-    let extension = requested
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    if extension != "md" {
-        return Json(json!({
-            "ok": false,
-            "message": "Only .md files are allowed."
+            "message": "Path must be an absolute .md file inside configured catalog roots."
         }));
     }
 
@@ -151,6 +138,43 @@ async fn catalog_file(State(state): State<ApiState>, Query(query): Query<FileQue
             "message": format!("Failed to read file: {err}")
         })),
     }
+}
+
+async fn catalog_preview(State(state): State<ApiState>, Query(query): Query<FileQuery>) -> Json<Value> {
+    let requested = PathBuf::from(&query.path);
+    if !is_valid_markdown_request(&requested, state.catalog_roots.as_slice()) {
+        return Json(json!({
+            "ok": false,
+            "message": "Path must be an absolute .md file inside configured catalog roots."
+        }));
+    }
+
+    let content = match fs::read_to_string(&requested) {
+        Ok(content) => content,
+        Err(err) => {
+            return Json(json!({
+                "ok": false,
+                "message": format!("Failed to read file: {err}")
+            }));
+        }
+    };
+
+    let publish_text = publish::extract_publish_text(&content);
+    let media_refs = publish::extract_obsidian_embeds(&content);
+    let media = publish::collect_media_preview(&requested, &media_refs, state.media_lookup_paths.as_slice());
+    let issues = publish::preview_issues(&publish_text, &media);
+
+    Json(json!({
+        "ok": true,
+        "path": requested.to_string_lossy(),
+        "preview": {
+            "publish_text": publish_text,
+            "media_refs": media_refs,
+            "media": media,
+            "issues": issues,
+            "publishable": issues.is_empty()
+        }
+    }))
 }
 
 fn build_tree(root: &Path, depth: usize) -> Result<Vec<CatalogNode>, String> {
@@ -212,6 +236,21 @@ fn is_path_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
             .map(|canonical_root| canonical_path.starts_with(canonical_root))
             .unwrap_or(false)
     })
+}
+
+fn is_valid_markdown_request(path: &Path, roots: &[PathBuf]) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if extension != "md" {
+        return false;
+    }
+    is_path_within_roots(path, roots)
 }
 
 fn print_json(value: &Value, pretty: bool) {

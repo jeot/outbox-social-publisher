@@ -266,7 +266,14 @@ pub async fn run() -> ExitCode {
     if let Commands::Serve(args) = cli.command {
         let host = args.host.unwrap_or_else(|| config.api_host.clone());
         let port = args.port.unwrap_or(config.api_port);
-        return api::run_server(host, port, config.catalog_roots.clone(), config.pretty_json).await;
+        return api::run_server(
+            host,
+            port,
+            config.catalog_roots.clone(),
+            config.media_lookup_paths.clone(),
+            config.pretty_json,
+        )
+        .await;
     }
 
     let result: Result<Value, AppError> = match cli.command {
@@ -860,6 +867,7 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
 
     match job.platform.as_deref() {
         Some("linkedin") => {
+            publish::validate_linkedin_media_count(parsed.media_paths.len())?;
             let auth = load_linkedin_auth()?;
             let signature_text = resolve_signature_text(config, PublishPlatformKind::Linkedin, None)?;
             let commentary_raw = if let Some(sig) = signature_text {
@@ -886,6 +894,7 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
             })
         }
         Some("x") => {
+            publish::validate_x_media_count(parsed.media_paths.len())?;
             let _auth = load_x_auth()?;
             let signature_text = resolve_signature_text(config, PublishPlatformKind::X, None)?;
             let text = if let Some(sig) = signature_text {
@@ -903,7 +912,7 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
                     command: Some("publo auth x login".to_string()),
                 });
             }
-            validate_x_post_text(&text, false, false)?;
+            publish::validate_x_post_text(&text, false, false)?;
             let text_sha256 = compute_content_sha256(text.as_bytes());
             let author_key = x_author_key();
             let fingerprint_source = combine_text_and_media_for_fingerprint(&text, &media_sha);
@@ -918,8 +927,8 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
                     "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                     "text": text,
                     "local_preflight": {
-                        "weighted_length": x_weighted_length(&text),
-                        "cashtag_count": extract_cashtags(&text).len()
+                        "weighted_length": publish::x_weighted_length(&text),
+                        "cashtag_count": publish::extract_cashtags(&text).len()
                     },
                     "author": author_key
                 }),
@@ -2000,6 +2009,7 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
     }
 
     let parsed = parse_post_input(&args.file, config)?;
+    publish::validate_linkedin_media_count(parsed.media_paths.len())?;
     let mut commentary_raw = parsed.publish_text;
     let signature_override = signature_cli_override(args.add_signature, args.no_signature);
     let mut signature_applied = false;
@@ -2056,16 +2066,6 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
                 );
             preview
         } else {
-            if parsed.media_paths.len() > 20 {
-                return Err(AppError::Validation {
-                    message: format!(
-                        "LinkedIn multi-image supports at most 20 images; found {}.",
-                        parsed.media_paths.len()
-                    ),
-                    suggestion: Some("Reduce image count to 20 or fewer and retry.".to_string()),
-                    command: None,
-                });
-            }
             let mut preview = payload.clone();
             let images_preview: Vec<Value> = parsed
                 .media_paths
@@ -2154,16 +2154,6 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
 
     let mut media_urns: Vec<String> = Vec::new();
     if !parsed.media_paths.is_empty() {
-        if parsed.media_paths.len() > 20 {
-            return Err(AppError::Validation {
-                message: format!(
-                    "LinkedIn multi-image supports at most 20 images; found {}.",
-                    parsed.media_paths.len()
-                ),
-                suggestion: Some("Reduce image count to 20 or fewer and retry.".to_string()),
-                command: None,
-            });
-        }
         for path in &parsed.media_paths {
             let image_urn = linkedin_upload_image(
                 &client,
@@ -2324,6 +2314,7 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     }
 
     let parsed = parse_post_input(&args.file, config)?;
+    publish::validate_x_media_count(parsed.media_paths.len())?;
     let mut text = parsed.publish_text;
     let signature_override = signature_cli_override(args.add_signature, args.no_signature);
     let mut signature_applied = false;
@@ -2332,16 +2323,6 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     {
         text.push_str(&signature);
         signature_applied = true;
-    }
-    if parsed.media_paths.len() > 4 {
-        return Err(AppError::Validation {
-            message: format!(
-                "X supports at most 4 images per post; found {}.",
-                parsed.media_paths.len()
-            ),
-            suggestion: Some("Reduce image count to 4 or fewer and retry.".to_string()),
-            command: None,
-        });
     }
     if !parsed.media_paths.is_empty() && !x_scope_contains("media.write") {
         return Err(AppError::MissingAuth {
@@ -2356,10 +2337,10 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     let bypass_duplicate = args.force || args.allow_duplicate;
     let bypass_cashtag = args.force || args.allow_cashtag;
     let bypass_length = args.force || args.allow_length;
-    let cashtag_count = extract_cashtags(&text).len();
-    let weighted_len = x_weighted_length(&text);
+    let cashtag_count = publish::extract_cashtags(&text).len();
+    let weighted_len = publish::x_weighted_length(&text);
 
-    validate_x_post_text(&text, bypass_cashtag, bypass_length)?;
+    publish::validate_x_post_text(&text, bypass_cashtag, bypass_length)?;
 
     let auth = load_x_auth()?;
     let author_key = x_author_key();
@@ -2636,166 +2617,6 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     Ok(value)
 }
 
-fn validate_x_post_text(
-    text: &str,
-    allow_cashtag: bool,
-    allow_length: bool,
-) -> Result<(), AppError> {
-    let cashtags = extract_cashtags(text);
-    if !allow_cashtag && cashtags.len() > 1 {
-        return Err(AppError::Validation {
-            message: format!(
-                "X self-serve posting allows max 1 cashtag per post; found {}.",
-                cashtags.len()
-            ),
-            suggestion: Some(
-                "Keep at most one cashtag (for example: $AAPL), or use --allow-cashtag to bypass local check."
-                    .to_string(),
-            ),
-            command: Some("publo publish x --file <path>".to_string()),
-        });
-    }
-
-    let weighted_len = x_weighted_length(text);
-    if !allow_length && weighted_len > 280 {
-        return Err(AppError::Validation {
-            message: format!(
-                "X post is too long by weighted count: {} > 280.",
-                weighted_len
-            ),
-            suggestion: Some(
-                "Shorten text (URLs count as 23 chars; many non-ASCII/emoji chars count as 2), or use --allow-length to bypass local check."
-                    .to_string(),
-            ),
-            command: Some("publo publish x --file <path>".to_string()),
-        });
-    }
-
-    Ok(())
-}
-
-fn extract_cashtags(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-
-    while i < chars.len() {
-        if chars[i] != '$' {
-            i += 1;
-            continue;
-        }
-
-        let prev_is_word = if i == 0 {
-            false
-        } else {
-            let p = chars[i - 1];
-            p.is_ascii_alphanumeric() || p == '_'
-        };
-        if prev_is_word {
-            i += 1;
-            continue;
-        }
-
-        let mut j = i + 1;
-        if j >= chars.len() || !chars[j].is_ascii_alphabetic() {
-            i += 1;
-            continue;
-        }
-        j += 1;
-        while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
-            j += 1;
-        }
-
-        let next_is_word = if j < chars.len() {
-            let n = chars[j];
-            n.is_ascii_alphanumeric() || n == '_'
-        } else {
-            false
-        };
-        if !next_is_word {
-            let tag: String = chars[i..j].iter().collect();
-            out.push(tag);
-        }
-        i = j;
-    }
-
-    out
-}
-
-fn x_weighted_length(text: &str) -> usize {
-    text.split_whitespace()
-        .map(|token| {
-            if looks_like_url(token) {
-                23
-            } else {
-                token.chars().map(x_char_weight).sum()
-            }
-        })
-        .sum::<usize>()
-        + text.chars().filter(|c| c.is_whitespace()).count()
-}
-
-fn looks_like_url(token: &str) -> bool {
-    let stripped = token
-        .trim_end_matches(|c: char| ",.!?;:)]}\"'".contains(c))
-        .trim_start_matches('(')
-        .trim_start_matches('[')
-        .trim_start_matches('{');
-    let lower = stripped.to_ascii_lowercase();
-    (lower.starts_with("http://") || lower.starts_with("https://")) && Url::parse(stripped).is_ok()
-}
-
-fn x_char_weight(ch: char) -> usize {
-    if ch.is_ascii() {
-        return 1;
-    }
-    if is_cjk(ch) || is_emoji_like(ch) {
-        return 2;
-    }
-    2
-}
-
-fn is_cjk(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x11FF
-            | 0x2E80..=0x2EFF
-            | 0x2F00..=0x2FDF
-            | 0x2FF0..=0x2FFF
-            | 0x3000..=0x303F
-            | 0x3040..=0x309F
-            | 0x30A0..=0x30FF
-            | 0x3100..=0x312F
-            | 0x3130..=0x318F
-            | 0x31A0..=0x31BF
-            | 0x31C0..=0x31EF
-            | 0x31F0..=0x31FF
-            | 0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xA960..=0xA97F
-            | 0xAC00..=0xD7AF
-            | 0xF900..=0xFAFF
-            | 0xFE30..=0xFE4F
-            | 0x20000..=0x2FA1F
-    )
-}
-
-fn is_emoji_like(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1F300..=0x1F5FF
-            | 0x1F600..=0x1F64F
-            | 0x1F680..=0x1F6FF
-            | 0x1F700..=0x1F77F
-            | 0x1F780..=0x1F7FF
-            | 0x1F800..=0x1F8FF
-            | 0x1F900..=0x1F9FF
-            | 0x1FA00..=0x1FAFF
-            | 0x2600..=0x26FF
-            | 0x2700..=0x27BF
-    )
-}
-
 fn is_generic_x_forbidden(api_error: Option<&Value>) -> bool {
     let Some(err) = api_error else {
         return false;
@@ -2825,12 +2646,10 @@ fn parse_post_input(file_path: &PathBuf, config: &RuntimeConfig) -> Result<Parse
         message: format!("Failed to read content file: {err}"),
     })?;
 
-    let media_refs = extract_obsidian_embeds(&content);
-    let media_paths = resolve_media_paths(file_path, &media_refs, config)?;
+    let media_refs = publish::extract_obsidian_embeds(&content);
+    let media_paths = publish::resolve_media_paths(file_path, &media_refs, &config.media_lookup_paths)?;
 
-    let publish_section = extract_publish_section_after_last_separator(&content);
-    let publish_text_without_embeds = remove_obsidian_embed_placeholders(&publish_section);
-    let publish_text = trim_outer_empty_lines(&publish_text_without_embeds);
+    let publish_text = publish::extract_publish_text(&content);
     if publish_text.is_empty() {
         return Err(AppError::Validation {
             message: "Post text is empty after removing metadata and image placeholders.".to_string(),
@@ -2844,132 +2663,6 @@ fn parse_post_input(file_path: &PathBuf, config: &RuntimeConfig) -> Result<Parse
         media_paths,
         file_sha256: compute_content_sha256(content.as_bytes()),
     })
-}
-
-fn extract_publish_section_after_last_separator(raw: &str) -> String {
-    let mut last_sep_end = None;
-    let mut cursor = 0usize;
-    for line in raw.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
-        if trimmed == "---" {
-            last_sep_end = Some(cursor + line.len());
-        }
-        cursor += line.len();
-    }
-    match last_sep_end {
-        Some(idx) => raw[idx..].to_string(),
-        None => raw.to_string(),
-    }
-}
-
-fn trim_outer_empty_lines(raw: &str) -> String {
-    raw.trim().to_string()
-}
-
-fn extract_obsidian_embeds(raw: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    while let Some(open_rel) = raw[start..].find("![[") {
-        let open = start + open_rel + 3;
-        if let Some(close_rel) = raw[open..].find("]]") {
-            let close = open + close_rel;
-            let inner = raw[open..close].trim();
-            if !inner.is_empty() {
-                let cleaned = inner
-                    .split('|')
-                    .next()
-                    .unwrap_or(inner)
-                    .split('#')
-                    .next()
-                    .unwrap_or(inner)
-                    .trim();
-                if !cleaned.is_empty() {
-                    out.push(cleaned.to_string());
-                }
-            }
-            start = close + 2;
-        } else {
-            break;
-        }
-    }
-    out
-}
-
-fn remove_obsidian_embed_placeholders(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut start = 0usize;
-    while let Some(open_rel) = raw[start..].find("![[") {
-        let open = start + open_rel;
-        out.push_str(&raw[start..open]);
-        let content_start = open + 3;
-        if let Some(close_rel) = raw[content_start..].find("]]") {
-            let close = content_start + close_rel + 2;
-            start = close;
-        } else {
-            out.push_str(&raw[open..]);
-            start = raw.len();
-            break;
-        }
-    }
-    if start < raw.len() {
-        out.push_str(&raw[start..]);
-    }
-    out
-}
-
-fn resolve_media_paths(
-    note_path: &PathBuf,
-    refs: &[String],
-    config: &RuntimeConfig,
-) -> Result<Vec<PathBuf>, AppError> {
-    let mut resolved = Vec::new();
-    let note_dir = note_path.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-
-    for media_ref in refs {
-        let ref_path = PathBuf::from(media_ref);
-        let ext = ref_path
-            .extension()
-            .and_then(|x| x.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if ext != "png" && ext != "jpg" && ext != "jpeg" {
-            return Err(AppError::Validation {
-                message: format!(
-                    "Unsupported media extension for '{}'. Allowed: .png, .jpg, .jpeg",
-                    media_ref
-                ),
-                suggestion: Some("Convert image to allowed extension and retry.".to_string()),
-                command: None,
-            });
-        }
-
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if ref_path.is_absolute() {
-            candidates.push(ref_path.clone());
-        } else {
-            candidates.push(note_dir.join(&ref_path));
-            for base in &config.media_lookup_paths {
-                candidates.push(base.join(&ref_path));
-            }
-        }
-
-        let found = candidates.into_iter().find(|p| p.is_file());
-        let Some(path) = found else {
-            return Err(AppError::Validation {
-                message: format!("Referenced media file not found: '{}'", media_ref),
-                suggestion: Some(
-                    "Place media in note folder or configure [media].lookup_paths in config.toml."
-                        .to_string(),
-                ),
-                command: None,
-            });
-        };
-
-        let canon = fs::canonicalize(&path).unwrap_or(path.clone());
-        resolved.push(canon);
-    }
-
-    Ok(resolved)
 }
 
 fn compute_media_signature(media_paths: &[PathBuf]) -> Result<String, AppError> {

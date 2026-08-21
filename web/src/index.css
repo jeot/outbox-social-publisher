@@ -136,3 +136,15 @@
     @apply font-sans;
     }
 }
+
+.red {
+  border: 1px solid red;
+}
+
+.pink {
+  border: 1px solid deeppink;
+}
+
+.blue {
+  border: 1px solid dodgerblue;
+}
