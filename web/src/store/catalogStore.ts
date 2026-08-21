@@ -29,7 +29,20 @@ export const useCatalogStore = create<CatalogState>((set) => ({
     set({ loading: true, error: null })
     try {
       const response = await fetch("/api/catalog/tree")
-      const data = await response.json()
+      const raw = await response.text()
+      let data: any = null
+      if (raw.trim().length > 0) {
+        try {
+          data = JSON.parse(raw)
+        } catch {
+          throw new Error(
+            `catalog API returned non-JSON response (status ${response.status})`
+          )
+        }
+      }
+      if (!data) {
+        throw new Error(`catalog API returned empty response (status ${response.status})`)
+      }
       if (!response.ok || !data?.ok) {
         throw new Error(data?.message ?? "failed to load catalog")
       }
@@ -39,10 +52,15 @@ export const useCatalogStore = create<CatalogState>((set) => ({
         error: null,
       })
     } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "unknown error"
       set({
         roots: [],
         loading: false,
-        error: err instanceof Error ? err.message : "unknown error",
+        error:
+          message.includes("Failed to fetch")
+            ? "Cannot reach Publo API. Start backend with `cargo run -- serve` (or `pnpm --dir web dev:full`)."
+            : message,
       })
     }
   },
