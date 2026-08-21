@@ -118,10 +118,18 @@
 }
 
 @layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
   * {
     @apply border-border outline-ring/50;
     }
   body {
+    margin: 0;
     @apply bg-background text-foreground;
     }
   html {

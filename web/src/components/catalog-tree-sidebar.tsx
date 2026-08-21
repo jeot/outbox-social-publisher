@@ -12,6 +12,8 @@ export function CatalogTreePanel({ className }: { className?: string }) {
   const loading = useCatalogStore((state) => state.loading)
   const error = useCatalogStore((state) => state.error)
   const loadCatalog = useCatalogStore((state) => state.loadCatalog)
+  const selectedFilePath = useCatalogStore((state) => state.selectedFilePath)
+  const selectFile = useCatalogStore((state) => state.selectFile)
 
   return (
     <aside className={className}>
@@ -55,7 +57,12 @@ export function CatalogTreePanel({ className }: { className?: string }) {
                       ) : (
                         <ul className="space-y-1">
                           {entry.tree.map((node) => (
-                            <TreeNode key={node.path} node={node} />
+                            <TreeNode
+                              key={node.path}
+                              node={node}
+                              selectedFilePath={selectedFilePath}
+                              onSelectFile={selectFile}
+                            />
                           ))}
                         </ul>
                       )}
@@ -77,15 +84,25 @@ function rootLabel(fullPath: string): string {
   return parts[parts.length - 1] ?? fullPath
 }
 
-function TreeNode({ node }: { node: CatalogNode }) {
+function TreeNode({
+  node,
+  selectedFilePath,
+  onSelectFile,
+}: {
+  node: CatalogNode
+  selectedFilePath: string | null
+  onSelectFile: (path: string) => Promise<void>
+}) {
   const [open, setOpen] = useState(false)
 
   if (node.kind === "file") {
+    const selected = selectedFilePath === node.path
     return (
       <li>
         <button
           type="button"
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
+          onClick={() => void onSelectFile(node.path)}
+          className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${selected ? "bg-accent font-medium" : "hover:bg-accent"}`}
         >
           {/*<FileIcon className="size-4" />*/}
           <span className="min-w-0 truncate">{node.name}</span>
@@ -107,7 +124,12 @@ function TreeNode({ node }: { node: CatalogNode }) {
         <CollapsibleContent className="pl-6">
           <ul className="space-y-1">
             {(node.children ?? []).map((child) => (
-              <TreeNode key={child.path} node={child} />
+              <TreeNode
+                key={child.path}
+                node={child}
+                selectedFilePath={selectedFilePath}
+                onSelectFile={onSelectFile}
+              />
             ))}
           </ul>
         </CollapsibleContent>
