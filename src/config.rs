@@ -17,6 +17,7 @@ struct GlobalConfigFile {
     timeouts: Option<TimeoutConfig>,
     api: Option<ApiConfigFile>,
     workspace: Option<WorkspaceConfigSelector>,
+    security: Option<SecurityConfigFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +30,12 @@ struct WorkspaceFileConfig {
     media: Option<MediaConfigFile>,
     db: Option<DbConfigFile>,
     catalog: Option<CatalogConfigFile>,
+    security: Option<SecurityConfigFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SecurityConfigFile {
+    publish_cli_password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,7 +118,7 @@ pub(crate) struct RuntimePaths {
     pub(crate) x_oauth_state_path: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RuntimeConfig {
     pub(crate) pretty_json: bool,
     pub(crate) connect_timeout: Duration,
@@ -124,6 +131,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) api_host: String,
     pub(crate) api_port: u16,
     pub(crate) catalog_roots: Vec<PathBuf>,
+    pub(crate) publish_cli_password: String,
     pub(crate) workspace_display_name: String,
     pub(crate) paths: RuntimePaths,
 }
@@ -151,6 +159,7 @@ pub(crate) fn load_config() -> RuntimeConfig {
         api_host: "127.0.0.1".to_string(),
         api_port: 8787,
         catalog_roots: Vec::new(),
+        publish_cli_password: "shk".to_string(),
         workspace_display_name: default_workspace_display_name(&paths.workspace_id),
         paths: paths.clone(),
     };
@@ -270,6 +279,20 @@ pub(crate) fn load_config() -> RuntimeConfig {
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| default_workspace_display_name(&paths.workspace_id));
 
+    let publish_cli_password = workspace_config
+        .as_ref()
+        .and_then(|cfg| cfg.security.as_ref())
+        .and_then(|s| s.publish_cli_password.as_ref())
+        .or_else(|| {
+            global_config
+                .as_ref()
+                .and_then(|cfg| cfg.security.as_ref())
+                .and_then(|s| s.publish_cli_password.as_ref())
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| defaults.publish_cli_password.clone());
+
     RuntimeConfig {
         pretty_json,
         connect_timeout,
@@ -282,6 +305,7 @@ pub(crate) fn load_config() -> RuntimeConfig {
         api_host,
         api_port,
         catalog_roots,
+        publish_cli_password,
         workspace_display_name,
         paths,
     }

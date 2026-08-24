@@ -19,3 +19,6 @@ enabled = false
 
 [media]
 lookup_paths = []
+
+[security]
+publish_cli_password = "shk"

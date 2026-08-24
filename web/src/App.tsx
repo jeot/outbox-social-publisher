@@ -9,6 +9,7 @@ import { ScheduledPage } from "@/components/scheduled-page"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { useUiStore } from "@/store/uiStore"
+import { Toaster } from "sonner"
 
 function App() {
   const activePage = useUiStore((state) => state.activePage)
@@ -25,6 +26,7 @@ function App() {
 
   return (
     <TooltipProvider>
+      <Toaster richColors position="bottom-right" />
       <SidebarProvider
         className="h-svh overflow-hidden"
         open={leftSidebarOpen}
@@ -67,7 +69,7 @@ function MainContent({ activePage }: { activePage: AppPage }) {
 function getPageTitle(activePage: AppPage): string {
   switch (activePage) {
     case "ready":
-      return "Ready"
+      return "Decision Queue"
     case "scheduled":
       return "Scheduled"
     default:

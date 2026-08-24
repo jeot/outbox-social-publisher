@@ -1,12 +1,665 @@
+import { useEffect, useMemo, useState } from "react"
+import { CalendarClockIcon, CheckIcon, ChevronDownIcon, Link2Icon, SparklesIcon } from "lucide-react"
+
+import {
+  listBlockedJobs,
+  listCanceledJobs,
+  listDisabledJobs,
+  listReadyJobs,
+  scheduleJobMulti,
+  setReadyJobTime,
+  setReadyJobPlatforms,
+  type JobItem,
+  unreadyJob,
+} from "@/lib/jobsApi"
+import { displayCatalogPath } from "@/lib/catalogPath"
+import { useCatalogStore } from "@/store/catalogStore"
+import { useUiStore } from "@/store/uiStore"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+
+type Preset = {
+  key: string
+  label: string
+  at: () => Date
+}
+
+type PlatformSelection = {
+  linkedin: boolean
+  x: boolean
+}
+
+const SCHEDULE_PRESETS: Preset[] = [
+  { key: "today_09", label: "Today 09:00", at: () => localAt(0, 9) },
+  { key: "today_12", label: "Today 12:00", at: () => localAt(0, 12) },
+  { key: "today_16", label: "Today 16:00", at: () => localAt(0, 16) },
+  { key: "today_19", label: "Today 19:00", at: () => localAt(0, 19) },
+  { key: "tomorrow_09", label: "Tomorrow 09:00", at: () => localAt(1, 9) },
+  { key: "tomorrow_12", label: "Tomorrow 12:00", at: () => localAt(1, 12) },
+  { key: "tomorrow_16", label: "Tomorrow 16:00", at: () => localAt(1, 16) },
+  { key: "tomorrow_19", label: "Tomorrow 19:00", at: () => localAt(1, 19) },
+  { key: "next_week_09", label: "Next week 09:00", at: () => localAt(7, 9) },
+  { key: "next_week_12", label: "Next week 12:00", at: () => localAt(7, 12) },
+  { key: "next_week_16", label: "Next week 16:00", at: () => localAt(7, 16) },
+  { key: "next_week_19", label: "Next week 19:00", at: () => localAt(7, 19) },
+  { key: "plus_5m", label: "+5m", at: () => plusMinutes(5) },
+  { key: "plus_30m", label: "+30m", at: () => plusMinutes(30) },
+  { key: "plus_1h", label: "+1h", at: () => plusMinutes(60) },
+  { key: "plus_3h", label: "+3h", at: () => plusMinutes(180) },
+]
+
 export function ReadyPage() {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
-      <div className="rounded-xl border bg-card p-6">
-        <h2 className="text-xl font-semibold">Ready</h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Ready workspace is in progress.
-        </p>
-      </div>
-    </div>
+  const [readyItems, setReadyItems] = useState<JobItem[]>([])
+  const [blockedItems, setBlockedItems] = useState<JobItem[]>([])
+  const [canceledItems, setCanceledItems] = useState<JobItem[]>([])
+  const [disabledItems, setDisabledItems] = useState<JobItem[]>([])
+  const [readyHasIssueById, setReadyHasIssueById] = useState<Record<string, boolean>>({})
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [actionKey, setActionKey] = useState<string | null>(null)
+  const [savingPlatformsById, setSavingPlatformsById] = useState<Record<string, boolean>>({})
+  const [customDateById, setCustomDateById] = useState<Record<string, string>>({})
+  const [customTimeById, setCustomTimeById] = useState<Record<string, string>>({})
+  const [customDialogJobId, setCustomDialogJobId] = useState<string | null>(null)
+  const [platformById, setPlatformById] = useState<Record<string, PlatformSelection>>({})
+  const setActivePage = useUiStore((state) => state.setActivePage)
+  const roots = useCatalogStore((state) => state.roots)
+  const loadCatalog = useCatalogStore((state) => state.loadCatalog)
+  const revealFileInTree = useCatalogStore((state) => state.revealFileInTree)
+  const selectFile = useCatalogStore((state) => state.selectFile)
+  const rootPaths = useMemo(() => roots.map((item) => item.root), [roots])
+  const staleItems = useMemo(
+    () => [...blockedItems, ...canceledItems, ...disabledItems],
+    [blockedItems, canceledItems, disabledItems]
   )
+  const decisionItems = useMemo(() => [...readyItems, ...staleItems], [readyItems, staleItems])
+
+  const timezone = useMemo(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    []
+  )
+
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [ready, blocked, canceled, disabled] = await Promise.all([
+        listReadyJobs(),
+        listBlockedJobs(),
+        listCanceledJobs(),
+        listDisabledJobs(),
+      ])
+      setReadyItems(ready)
+      setBlockedItems(blocked)
+      setCanceledItems(canceled)
+      setDisabledItems(disabled)
+      const issueChecks = await Promise.all(
+        ready.map(async (job) => ({
+          id: job.id,
+          hasIssue: await checkReadyFileHasIssue(job.file_path),
+        }))
+      )
+      const nextIssueMap: Record<string, boolean> = {}
+      for (const item of issueChecks) nextIssueMap[item.id] = item.hasIssue
+      setReadyHasIssueById(nextIssueMap)
+      setPlatformById((state) => {
+        const updated = { ...state }
+        const decision = [...ready, ...blocked, ...canceled, ...disabled]
+        for (const job of decision) {
+          const selected = Array.isArray(job.selected_platforms)
+            ? job.selected_platforms
+            : []
+          updated[job.id] = {
+            linkedin: selected.includes("linkedin") || job.platform === "linkedin",
+            x: selected.includes("x") || job.platform === "x",
+          }
+        }
+        return updated
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to load ready jobs")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [])
+
+  const runAction = async (key: string, fn: () => Promise<void>) => {
+    setActionKey(key)
+    setError(null)
+    try {
+      await fn()
+      await Promise.all([load(), loadCatalog()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "action failed")
+    } finally {
+      setActionKey(null)
+    }
+  }
+
+  const showFile = async (path: string) => {
+    setError(null)
+    try {
+      setActivePage("catalog")
+      await loadCatalog()
+      revealFileInTree(path)
+      await selectFile(path)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to open file in catalog")
+    }
+  }
+
+  const selectedPlatforms = (jobId: string): Array<"linkedin" | "x"> => {
+    const existing = platformById[jobId]
+    const fallbackJob = decisionItems.find((item) => item.id === jobId)
+    const fallbackSelected = Array.isArray(fallbackJob?.selected_platforms)
+      ? fallbackJob.selected_platforms
+      : []
+    const selection: PlatformSelection = existing ?? {
+      linkedin:
+        fallbackSelected.includes("linkedin") || fallbackJob?.platform === "linkedin",
+      x: fallbackSelected.includes("x") || fallbackJob?.platform === "x",
+    }
+    const out: Array<"linkedin" | "x"> = []
+    if (selection.linkedin) out.push("linkedin")
+    if (selection.x) out.push("x")
+    return out
+  }
+
+  const persistPlatforms = async (jobId: string, selection: PlatformSelection) => {
+    const selected = selectedPlatformsFromSelection(selection)
+    setSavingPlatformsById((state) => ({ ...state, [jobId]: true }))
+    try {
+      await setReadyJobPlatforms(jobId, selected)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to save platform selection")
+      await load()
+    } finally {
+      setSavingPlatformsById((state) => ({ ...state, [jobId]: false }))
+    }
+  }
+
+  const scheduleWithPreset = async (job: JobItem, preset: Preset) => {
+    const platforms = selectedPlatforms(job.id)
+    if (platforms.length === 0) {
+      setError("Select at least one platform before scheduling.")
+      return
+    }
+
+    const at = preset.at().toISOString()
+    await runAction(`schedule:${job.id}:${preset.key}`, async () => {
+      await scheduleJobMulti(job.id, at, timezone, platforms)
+    })
+  }
+
+  const scheduleCustom = async (jobId: string) => {
+    const datePart = customDateById[jobId]
+    const timePart = customTimeById[jobId]
+    if (!datePart || !timePart) {
+      setError("Select custom date and time first.")
+      return
+    }
+
+    const date = new Date(`${datePart}T${timePart}`)
+    if (Number.isNaN(date.getTime())) {
+      setError("Invalid custom datetime.")
+      return
+    }
+
+    await runAction(`ready-time:${jobId}`, async () => {
+      await setReadyJobTime(jobId, date.toISOString(), timezone)
+    })
+    setCustomDialogJobId(null)
+  }
+
+  const applySuggestedSchedule = async (job: JobItem) => {
+    if (!job.run_at_utc) {
+      setError("Set a schedule time first.")
+      return
+    }
+    const platforms = selectedPlatforms(job.id)
+    if (platforms.length === 0) {
+      setError("Select at least one platform before scheduling.")
+      return
+    }
+    await runAction(`schedule-suggested:${job.id}`, async () => {
+      await scheduleJobMulti(job.id, job.run_at_utc!, timezone, platforms)
+    })
+  }
+
+  const openCustomForm = (jobId: string) => {
+    const current = decisionItems.find((item) => item.id === jobId)
+    const initial = current?.run_at_utc
+      ? toLocalDateTimeParts(new Date(current.run_at_utc))
+      : toLocalDateTimeParts(new Date())
+    setCustomDateById((state) =>
+      ({ ...state, [jobId]: initial.date })
+    )
+    setCustomTimeById((state) =>
+      ({ ...state, [jobId]: initial.time })
+    )
+    setCustomDialogJobId(jobId)
+  }
+
+  const customDialogJob = customDialogJobId
+    ? decisionItems.find((item) => item.id === customDialogJobId) ?? null
+    : null
+  const customDialogDate = customDialogJobId ? customDateById[customDialogJobId] ?? "" : ""
+  const customDialogTime = customDialogJobId ? customTimeById[customDialogJobId] ?? "" : ""
+  const customDialogBusy = customDialogJobId
+    ? Boolean(actionKey?.includes(customDialogJobId)) ||
+    Boolean(savingPlatformsById[customDialogJobId])
+    : false
+
+  return (
+    <>
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+        <div className="rounded-xl border bg-card p-6">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div>
+              <h2 className="text-xl font-semibold">Decision Queue</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Resolve everything that is not currently scheduled.
+              </p>
+            </div>
+            <Button variant="outline" onClick={() => void load()} disabled={loading}>
+              Refresh
+            </Button>
+          </div>
+
+          {error ? <p className="mb-3 text-sm text-destructive">{error}</p> : null}
+
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>File</TableHead>
+                <TableHead>Platforms</TableHead>
+                <TableHead>Quick Schedule</TableHead>
+                <TableHead>Custom Schedule</TableHead>
+                <TableHead>Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {decisionItems.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-sm text-muted-foreground">
+                    {loading ? "Loading decision queue..." : "No items in decision queue."}
+                  </TableCell>
+                </TableRow>
+              ) : (
+                decisionItems
+                  .sort((a, b) => decisionStatusRank(a.status) - decisionStatusRank(b.status))
+                  .map((job) => {
+                    const running = actionKey?.includes(job.id)
+                    const savingPlatforms = Boolean(savingPlatformsById[job.id])
+                    const isReady = job.status === "ready"
+                    const fallbackSelected = Array.isArray(job.selected_platforms)
+                      ? job.selected_platforms
+                      : []
+                    const fallbackSelection: PlatformSelection = {
+                      linkedin: fallbackSelected.includes("linkedin") || job.platform === "linkedin",
+                      x: fallbackSelected.includes("x") || job.platform === "x",
+                    }
+                    const selection = platformById[job.id] ?? fallbackSelection
+                    const displayPath = displayCatalogPath(job.file_path, rootPaths)
+
+                    return (
+                      <TableRow key={job.id}>
+                        <TableCell className="max-w-[340px] truncate" title={job.file_path}>
+                          <div className="flex flex-col gap-1">
+                            <span className="truncate">{displayPath}</span>
+                            <div className="flex gap-2">
+                              <Badge
+                                // className={
+                                //   isReady
+                                //     ? "bg-emerald-700 text-sm text-white"
+                                //     : "bg-red-600 text-sm text-white"
+                                // }
+                                variant={isReady ? "muted" : "destructive"}
+                              >
+                                {job.status}
+                              </Badge>
+                              <Badge variant="outline">{job.id.slice(0, 8)}</Badge>
+                              {job.operator === "ai" ? (
+                                <SparklesIcon className="size-4 text-emerald-500" />
+                              ) : null}
+                              {isReady && readyHasIssueById[job.id] ? (
+                                <Badge variant="destructive">Has issue</Badge>
+                              ) : job.status_reason ? (
+                                <Badge variant="destructive">{job.status_reason}</Badge>
+                              ) : null}
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-4">
+                            <Button
+                              size="sm"
+                              variant={selection.linkedin ? "default" : "outline"}
+                              className={selection.linkedin ? "bg-emerald-600 text-white hover:bg-emerald-700" : ""}
+                              disabled={Boolean(running) || savingPlatforms}
+                              onClick={() => {
+                                const nextSelection = {
+                                  linkedin: !selection.linkedin,
+                                  x: selection.x,
+                                }
+                                setPlatformById((state) => ({ ...state, [job.id]: nextSelection }))
+                                void persistPlatforms(job.id, nextSelection)
+                              }}
+                            >
+                              LinkedIn
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant={selection.x ? "default" : "outline"}
+                              className={selection.x ? "bg-emerald-600 text-white hover:bg-emerald-700" : ""}
+                              disabled={Boolean(running) || savingPlatforms}
+                              onClick={() => {
+                                const nextSelection = {
+                                  linkedin: selection.linkedin,
+                                  x: !selection.x,
+                                }
+                                setPlatformById((state) => ({ ...state, [job.id]: nextSelection }))
+                                void persistPlatforms(job.id, nextSelection)
+                              }}
+                            >
+                              X
+                            </Button>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger
+                              render={
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={Boolean(running) || savingPlatforms}
+                                />
+                              }
+                            >
+                              <span className="inline-flex items-center gap-2">
+                                Schedule
+                                <ChevronDownIcon className="size-4" />
+                              </span>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="start" sideOffset={6}>
+                              {SCHEDULE_PRESETS.map((preset) => (
+                                <DropdownMenuItem
+                                  key={preset.key}
+                                  onClick={() => {
+                                    void scheduleWithPreset(job, preset)
+                                  }}
+                                >
+                                  {preset.label}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={Boolean(running) || savingPlatforms}
+                            onClick={() => openCustomForm(job.id)}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <CalendarClockIcon className="size-4" />
+                              {readyScheduleLabel(job)}
+                              {job.operator === "ai" ? (
+                                <SparklesIcon className="size-4 text-emerald-500" />
+                              ) : null}
+                            </span>
+                          </Button>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            {canScheduleFromSuggestion(job, selection) ? (
+                              <Button
+                                size="icon-sm"
+                                variant="default"
+                                disabled={Boolean(running) || savingPlatforms}
+                                onClick={() => {
+                                  void applySuggestedSchedule(job)
+                                }}
+                              >
+                                <CheckIcon className="size-4" />
+                              </Button>
+                            ) : null}
+                            <Tooltip>
+                              <TooltipTrigger
+                                render={
+                                  <Button
+                                    size="icon-sm"
+                                    variant="outline"
+                                    disabled={Boolean(running) || savingPlatforms}
+                                    onClick={() => {
+                                      void showFile(job.file_path)
+                                    }}
+                                  />
+                                }
+                              >
+                                <Link2Icon className="size-4" />
+                              </TooltipTrigger>
+                              <TooltipContent>show the file</TooltipContent>
+                            </Tooltip>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={Boolean(running) || savingPlatforms}
+                              onClick={() => {
+                                if (!window.confirm("Remove this item from decision queue?")) return
+                                void runAction(`remove:${job.id}`, async () => {
+                                  await unreadyJob(job.id)
+                                })
+                              }}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+
+      <Dialog
+        open={customDialogJobId !== null}
+        onOpenChange={(open) => {
+          if (!open) setCustomDialogJobId(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Custom Schedule</DialogTitle>
+            <DialogDescription>
+              {customDialogJob
+                ? displayCatalogPath(customDialogJob.file_path, rootPaths)
+                : "Select custom date and time."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid gap-1">
+              <label className="text-xs text-muted-foreground">Date</label>
+              <Input
+                type="date"
+                value={customDialogDate}
+                onChange={(event) => {
+                  if (!customDialogJobId) return
+                  setCustomDateById((state) => ({
+                    ...state,
+                    [customDialogJobId]: event.target.value,
+                  }))
+                }}
+              />
+            </div>
+            <div className="grid gap-1">
+              <label className="text-xs text-muted-foreground">Time</label>
+              <Input
+                type="time"
+                value={customDialogTime}
+                onChange={(event) => {
+                  if (!customDialogJobId) return
+                  setCustomTimeById((state) => ({
+                    ...state,
+                    [customDialogJobId]: event.target.value,
+                  }))
+                }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              disabled={!customDialogJobId || customDialogBusy}
+              onClick={() => {
+                if (!customDialogJobId) return
+                void scheduleCustom(customDialogJobId)
+              }}
+            >
+              Save time
+            </Button>
+            <Button
+              variant="outline"
+              disabled={customDialogBusy}
+              onClick={() => setCustomDialogJobId(null)}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+function localAt(dayOffset: number, hour: number): Date {
+  const next = new Date()
+  next.setDate(next.getDate() + dayOffset)
+  next.setHours(hour, 0, 0, 0)
+  return next
+}
+
+function plusMinutes(minutes: number): Date {
+  const next = new Date()
+  next.setMinutes(next.getMinutes() + minutes)
+  return next
+}
+
+function selectedPlatformsFromSelection(
+  selection: PlatformSelection
+): Array<"linkedin" | "x"> {
+  const out: Array<"linkedin" | "x"> = []
+  if (selection.linkedin) out.push("linkedin")
+  if (selection.x) out.push("x")
+  return out
+}
+
+function toDateTimeLocalValue(date: Date): string {
+  const offsetMs = date.getTimezoneOffset() * 60_000
+  const local = new Date(date.getTime() - offsetMs)
+  return local.toISOString().slice(0, 16)
+}
+
+function toLocalDateTimeParts(date: Date): { date: string; time: string } {
+  const local = toDateTimeLocalValue(date)
+  const [datePart, timePart] = local.split("T")
+  return {
+    date: datePart ?? "",
+    time: timePart ?? "09:00",
+  }
+}
+
+function readyScheduleLabel(job: JobItem): string {
+  if (!job.run_at_utc) return "Set schedule time"
+  return formatRunAtLocal(job.run_at_utc)
+}
+
+function canScheduleFromSuggestion(
+  job: JobItem,
+  selection: PlatformSelection
+): boolean {
+  if (!job.run_at_utc) return false
+  return selection.linkedin || selection.x
+}
+
+function decisionStatusRank(status: string): number {
+  switch (status) {
+    case "ready":
+      return 0
+    case "blocked":
+      return 1
+    case "canceled":
+      return 2
+    case "disabled":
+      return 3
+    default:
+      return 99
+  }
+}
+
+function formatRunAtLocal(rawUtc: string): string {
+  const date = new Date(rawUtc)
+  if (Number.isNaN(date.getTime())) return rawUtc
+  const nowYear = new Date().getFullYear()
+  const includeYear = date.getFullYear() !== nowYear
+  const datePart = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    ...(includeYear ? { year: "numeric" } : {}),
+  }).format(date)
+  const timePart = new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date)
+  const weekdayPart = new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+  }).format(date)
+  return `${datePart}, ${timePart} (${weekdayPart})`
+}
+
+async function checkReadyFileHasIssue(filePath: string): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/catalog/preview?path=${encodeURIComponent(filePath)}`)
+    if (!response.ok) return true
+    const raw = await response.text()
+    if (raw.trim().length === 0) return true
+    const data: any = JSON.parse(raw)
+    if (!data?.ok) return true
+    return !Boolean(data?.preview?.publishable)
+  } catch {
+    return true
+  }
 }

@@ -4,7 +4,9 @@
 
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,                         -- UUID
-  batch_id TEXT NOT NULL,                      -- UUID grouping jobs created in one user action
+  action_group_id TEXT NOT NULL,                      -- UUID grouping jobs created in one user action
+  content_group_id TEXT NOT NULL,              -- UUID grouping jobs from the same content lineage
+  asset_id TEXT NOT NULL,                      -- Stable identity for a file asset (path can change)
   kind TEXT NOT NULL CHECK (kind IN ('catalog', 'quick')),
   status TEXT NOT NULL CHECK (
     status IN ('ready', 'scheduled', 'publishing', 'published', 'failed', 'blocked', 'canceled', 'disabled')
@@ -12,6 +14,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 
   -- Target info
   platform TEXT,
+  publish_mode TEXT CHECK (publish_mode IN ('single', 'thread')),
   workspace_id TEXT NOT NULL DEFAULT 'default',
   owner_user_id TEXT,
   executor_hint TEXT CHECK (executor_hint IN ('local', 'remote')),
@@ -48,9 +51,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   synced_at TEXT,
   modified_by TEXT NOT NULL DEFAULT 'local',
   CHECK (
-    (status = 'ready')
+    ((status = 'ready')
     OR
-    (status IN ('scheduled', 'publishing', 'published', 'failed', 'blocked', 'canceled', 'disabled') AND platform IS NOT NULL)
+    (status IN ('scheduled', 'publishing', 'published', 'failed', 'blocked', 'canceled', 'disabled') AND platform IS NOT NULL))
+    AND
+    (status <> 'scheduled' OR run_at_utc IS NOT NULL)
   )
 );
 
@@ -63,8 +68,14 @@ CREATE INDEX IF NOT EXISTS idx_jobs_platform_status
 CREATE INDEX IF NOT EXISTS idx_jobs_workspace_status_run_at
   ON jobs(workspace_id, status, run_at_utc);
 
-CREATE INDEX IF NOT EXISTS idx_jobs_batch_id
-  ON jobs(batch_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_action_group_id
+  ON jobs(action_group_id);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_content_group_id
+  ON jobs(content_group_id);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_asset_id
+  ON jobs(asset_id);
 
 CREATE INDEX IF NOT EXISTS idx_jobs_file_path
   ON jobs(file_path);
@@ -80,6 +91,14 @@ CREATE INDEX IF NOT EXISTS idx_jobs_operator
 
 CREATE INDEX IF NOT EXISTS idx_jobs_sync_scan
   ON jobs(updated_at, deleted_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_asset_platform
+  ON jobs(asset_id, platform)
+  WHERE deleted_at IS NULL AND platform IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_asset_ready
+  ON jobs(asset_id)
+  WHERE deleted_at IS NULL AND status = 'ready' AND platform IS NULL;
 
 CREATE TABLE IF NOT EXISTS publish_attempts (
   id TEXT PRIMARY KEY,                         -- UUID

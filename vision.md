@@ -94,3 +94,13 @@ The current focus is social publishing, but the model should expand naturally to
 Publo should be built as:
 
 > A local-first publishing assistant that turns files and ideas into scheduled publications.
+
+## Safety guardrails
+
+Publishing is a high-impact action. Publo should support explicit safeguards that reduce accidental external publishes from generic automation.
+
+Current direction:
+
+- scheduling and decision workflows stay easy
+- direct CLI publish commands can require an explicit publish password
+- AI-assisted workflows can prepare and verify, but publish only with deliberate authorization

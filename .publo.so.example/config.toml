@@ -11,3 +11,6 @@ request_seconds = 30
 [api]
 host = "127.0.0.1"
 port = 8787
+
+[security]
+publish_cli_password = "shk"

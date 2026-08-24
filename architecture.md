@@ -92,6 +92,12 @@ This project separates storage constraints from workflow behavior.
 
 These are structural rules only, not UX policy.
 
+Decision metadata separation:
+
+* `selected_platforms` stores scheduling/publishing intent (one or more platforms).
+* `tags` remains free-form metadata for user-defined labels/visual grouping.
+* decision logic must never infer platforms from `tags`.
+
 ### App-level lifecycle policy (user workflow)
 
 * `ready` → `scheduled`
@@ -205,6 +211,15 @@ The system should avoid accidentally publishing the same item twice because of a
 Failures should be visible and understandable.
 
 A failed Instagram publication should not prevent an unrelated LinkedIn or X publication from being handled.
+
+### Publish CLI safety gate
+
+Direct CLI publish commands are external-entry critical actions.
+
+* `publo publish linkedin` and `publo publish x` require `--pass <publish-pass>` for real publish; `--debug` does not require password.
+* expected value comes from config (`[security].publish_cli_password`).
+* invalid/missing password fails before real publish logic executes.
+* this gate is CLI-only; internal app/worker execution paths are not expected to depend on CLI flags.
 
 ## Human control
 

@@ -70,6 +70,8 @@ pub(crate) enum PublishPlatform {
 pub(crate) struct PublishLinkedinArgs {
     #[arg(long)]
     pub(crate) file: PathBuf,
+    #[arg(long, required_unless_present = "debug")]
+    pub(crate) pass: Option<String>,
     #[arg(long)]
     pub(crate) timeout_seconds: Option<u64>,
     #[arg(long, default_value_t = false)]
@@ -86,6 +88,8 @@ pub(crate) struct PublishLinkedinArgs {
 pub(crate) struct PublishXArgs {
     #[arg(long)]
     pub(crate) file: PathBuf,
+    #[arg(long, required_unless_present = "debug")]
+    pub(crate) pass: Option<String>,
     #[arg(long)]
     pub(crate) timeout_seconds: Option<u64>,
     #[arg(long, default_value_t = false)]
@@ -167,12 +171,16 @@ impl OperatorArg {
 
 #[derive(Debug, Args)]
 pub(crate) struct JobReadyArgs {
-    #[arg(long, value_enum)]
-    pub(crate) platform: Option<PlatformArg>,
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub(crate) platform: Vec<PlatformArg>,
     #[arg(long)]
     pub(crate) file: PathBuf,
-    #[arg(long, default_value = "default")]
-    pub(crate) workspace_id: String,
+    #[arg(long)]
+    pub(crate) at: Option<String>,
+    #[arg(long)]
+    pub(crate) timezone: Option<String>,
+    #[arg(long)]
+    pub(crate) workspace_id: Option<String>,
     #[arg(long)]
     pub(crate) owner_user_id: Option<String>,
     #[arg(long, value_enum, default_value = "user")]
@@ -229,8 +237,8 @@ pub(crate) struct JobAddScheduleArgs {
     pub(crate) at: String,
     #[arg(long)]
     pub(crate) timezone: Option<String>,
-    #[arg(long, default_value = "default")]
-    pub(crate) workspace_id: String,
+    #[arg(long)]
+    pub(crate) workspace_id: Option<String>,
     #[arg(long)]
     pub(crate) owner_user_id: Option<String>,
     #[arg(long, value_enum, default_value = "user")]
@@ -258,7 +266,7 @@ pub(crate) struct JobListArgs {
     #[arg(long, value_enum)]
     pub(crate) platform: Option<PlatformArg>,
     #[arg(long, default_value_t = 100)]
-    pub(crate) limit: i64,
+    pub(crate) limit: u32,
 }
 
 #[derive(Debug, Args)]

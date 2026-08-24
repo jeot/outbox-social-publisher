@@ -22,9 +22,18 @@ export type MediaPreview = {
   error: string | null
 }
 
+export type CatalogJobBadge = {
+  status: string
+  platform: string | null
+}
+
 type CatalogState = {
   roots: CatalogRoot[]
   readyByPath: Record<string, string | null>
+  badgesByPath: Record<string, CatalogJobBadge[]>
+  expandedDirPaths: string[]
+  highlightedFilePath: string | null
+  highlightTick: number
   loading: boolean
   error: string | null
   selectedFilePath: string | null
@@ -41,6 +50,9 @@ type CatalogState = {
   selectedFileError: string | null
   loadCatalog: () => Promise<void>
   selectFile: (path: string) => Promise<void>
+  revealFileInTree: (path: string) => void
+  setDirOpen: (path: string, open: boolean) => void
+  clearTreeHighlight: () => void
   markSelectedReady: () => Promise<void>
   unmarkSelectedReady: () => Promise<void>
 }
@@ -50,6 +62,10 @@ const LAST_SELECTED_FILE_STORAGE_KEY = "publo.catalog.lastSelectedFilePath"
 export const useCatalogStore = create<CatalogState>((set, get) => ({
   roots: [],
   readyByPath: {},
+  badgesByPath: {},
+  expandedDirPaths: [],
+  highlightedFilePath: null,
+  highlightTick: 0,
   loading: false,
   error: null,
   selectedFilePath: null,
@@ -92,9 +108,11 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
         if (!item || typeof item.path !== "string" || item.path.length === 0) continue
         readyByPath[item.path] = typeof item.operator === "string" ? item.operator : null
       }
+      const badgesByPath = parseCatalogBadgesByPath(data)
       set({
         roots,
         readyByPath,
+        badgesByPath,
         loading: false,
         error: null,
       })
@@ -111,6 +129,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       set({
         roots: [],
         readyByPath: {},
+        badgesByPath: {},
         loading: false,
         error:
           message.includes("Failed to fetch")
@@ -156,6 +175,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
 
       const preview = previewData?.preview ?? {}
       const ready = data?.ready ?? {}
+      const jobs = Array.isArray(data?.jobs) ? data.jobs : []
       const resolvedPath = data.path ?? path
       const readyOperator =
         typeof ready.operator === "string" && ready.operator.length > 0
@@ -174,6 +194,10 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
           typeof ready.job_id === "string" && ready.job_id.length > 0
             ? ready.job_id
             : null,
+        badgesByPath: {
+          ...get().badgesByPath,
+          [resolvedPath]: badgesFromJobs(jobs),
+        },
         readyByPath: Boolean(ready.is_ready)
           ? {
               ...get().readyByPath,
@@ -202,6 +226,27 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       })
       clearLastSelectedFilePath()
     }
+  },
+  revealFileInTree: (path) => {
+    const roots = get().roots
+    const expanded = new Set(get().expandedDirPaths)
+    for (const dirPath of ancestorDirPaths(path, roots)) {
+      expanded.add(dirPath)
+    }
+    set((state) => ({
+      expandedDirPaths: Array.from(expanded),
+      highlightedFilePath: path,
+      highlightTick: state.highlightTick + 1,
+    }))
+  },
+  setDirOpen: (path, open) => {
+    const expanded = new Set(get().expandedDirPaths)
+    if (open) expanded.add(path)
+    else expanded.delete(path)
+    set({ expandedDirPaths: Array.from(expanded) })
+  },
+  clearTreeHighlight: () => {
+    set({ highlightedFilePath: null })
   },
   markSelectedReady: async () => {
     const path = get().selectedFilePath
@@ -234,6 +279,10 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
         readyByPath: {
           ...state.readyByPath,
           [resolvedPath]: "user",
+        },
+        badgesByPath: {
+          ...state.badgesByPath,
+          [resolvedPath]: [{ status: "ready", platform: null }],
         },
       }))
     } catch (err) {
@@ -272,6 +321,11 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
             ([item]) => item !== path && item !== resolvedPath
           )
         ),
+        badgesByPath: Object.fromEntries(
+          Object.entries(state.badgesByPath).filter(
+            ([item]) => item !== path && item !== resolvedPath
+          )
+        ),
       }))
     } catch (err) {
       set({
@@ -298,6 +352,40 @@ function nodeListHasPath(nodes: CatalogNode[], targetPath: string): boolean {
     }
   }
   return false
+}
+
+function ancestorDirPaths(targetPath: string, roots: CatalogRoot[]): string[] {
+  const matchingRoot = findMatchingRoot(targetPath, roots)
+  if (!matchingRoot) return []
+  const root = trimTrailingSlash(matchingRoot)
+  if (targetPath.length <= root.length) return []
+
+  const relative = targetPath.slice(root.length + 1)
+  const parts = relative.split("/").filter(Boolean)
+  if (parts.length < 2) return []
+
+  const out: string[] = []
+  let current = root
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    current = `${current}/${parts[i]}`
+    out.push(current)
+  }
+  return out
+}
+
+function findMatchingRoot(targetPath: string, roots: CatalogRoot[]): string | null {
+  let best: string | null = null
+  for (const entry of roots) {
+    const root = trimTrailingSlash(entry.root)
+    if (targetPath === root || targetPath.startsWith(`${root}/`)) {
+      if (!best || root.length > best.length) best = root
+    }
+  }
+  return best
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "")
 }
 
 function readLastSelectedFilePath(): string | null {
@@ -340,4 +428,45 @@ function parseApiResponse(status: number, raw: string, label: string): any {
     throw new Error(`${label} returned empty response (status ${status})`)
   }
   return data
+}
+
+function parseCatalogBadgesByPath(data: any): Record<string, CatalogJobBadge[]> {
+  const output: Record<string, CatalogJobBadge[]> = {}
+  const items = Array.isArray(data?.job_states) ? data.job_states : []
+  for (const item of items) {
+    if (!item || typeof item.path !== "string" || item.path.length === 0) continue
+    const badges = Array.isArray(item.badges) ? item.badges : []
+    const normalized: CatalogJobBadge[] = []
+    for (const badge of badges) {
+      if (!badge || typeof badge.status !== "string" || badge.status.length === 0) continue
+      normalized.push({
+        status: badge.status,
+        platform:
+          typeof badge.platform === "string" && badge.platform.length > 0
+            ? badge.platform
+            : null,
+      })
+    }
+    if (normalized.length > 0) {
+      output[item.path] = normalized
+    }
+  }
+  return output
+}
+
+function badgesFromJobs(jobs: any[]): CatalogJobBadge[] {
+  const out: CatalogJobBadge[] = []
+  const seen = new Set<string>()
+  for (const job of jobs) {
+    if (!job || typeof job.status !== "string" || job.status.length === 0) continue
+    const platform =
+      typeof job.platform === "string" && job.platform.length > 0
+        ? job.platform
+        : null
+    const key = `${job.status}|${platform ?? ""}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ status: job.status, platform })
+  }
+  return out
 }

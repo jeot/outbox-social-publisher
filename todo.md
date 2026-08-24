@@ -29,6 +29,7 @@ Build a reliable local-first CLI with clear JSON contracts, auth basics, and pro
 - [x] Add deterministic idempotency key generation for publish requests.
 - [x] Return API error details transparently in JSON output.
 - [x] Write setup guide for another user on macOS, Linux, and Windows.
+- [x] Add publish CLI safety gate (`--pass`) with config-backed password for external publish commands.
 
 ## Phase 2 - X Platform Support
 
@@ -88,6 +89,9 @@ Implement the core scheduling experience in CLI and validate lifecycle/state beh
 - [x] Add workspace bootstrap + switching flow (`publo init`, `publo workspace switch`).
 - [x] Separate workspace identity model (`workspace_id`) from display name (`workspace.display_name`).
 - [x] Add getting-started + platform setup docs for first-time users.
+- [x] Enforce uniqueness and upsert behavior for decision/schedule writes to prevent duplicate logical jobs.
+- [x] Separate decision platform intent from tags (`selected_platforms` field).
+- [x] Allow marking broken files as ready; keep strict publishability checks at scheduling/publish time.
 
 ## Phase 6 - Minimal Local GUI (Catalog + Ready + Scheduling)
 
@@ -100,14 +104,14 @@ Add a minimal local GUI to validate the real scheduling workflow before implemen
 - [x] Show ready counts on folder/root nodes.
 - [x] Show AI-ready file badge variant (`Ready` + AI icon).
 - [x] Return file-level jobs array in catalog file API (`jobs: []` for selected file).
-- [ ] Add Ready page/list showing `ready` jobs.
-- [ ] Add actions from GUI: ready/unready, assign/remove platform, schedule/unschedule/cancel.
-- [ ] Add schedule presets:
-- [ ] today/tomorrow/next-week at 9:00 / 12:00 / 16:00 / 19:00.
-- [ ] +5m / +30m / +1h / +3h.
-- [ ] Wire GUI actions to local backend APIs that reuse core job logic.
-- [ ] Refresh status immediately after actions.
-- [ ] Add production UI serving mode from backend (`publo serve` serves `web/dist` + API).
+- [x] Add Ready page/list showing `ready` jobs.
+- [x] Add actions from GUI: ready/unready, assign/remove platform, schedule/unschedule/cancel.
+- [x] Add schedule presets:
+- [x] today/tomorrow/next-week at 9:00 / 12:00 / 16:00 / 19:00.
+- [x] +5m / +30m / +1h / +3h.
+- [x] Wire GUI actions to local backend APIs that reuse core job logic.
+- [x] Refresh status immediately after actions.
+- [x] Add production UI serving mode from backend (`publo serve` serves `web/dist` + API).
 
 ## Phase 7 - Publishing Core (Worker + Attempts)
 

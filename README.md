@@ -77,8 +77,8 @@ publo publish x --file ./post.md --debug
 5. Publish:
 
 ```bash
-publo publish linkedin --file ./post.md
-publo publish x --file ./post.md
+publo publish linkedin --file ./post.md --pass <publish-pass>
+publo publish x --file ./post.md --pass <publish-pass>
 ```
 
 ## Recommended local workflow (Obsidian-friendly)
@@ -117,7 +117,12 @@ enabled = false
 
 [media]
 lookup_paths = ["/absolute/path/to/media-assets"]
+
+[security]
+publish_cli_password = "shk"
 ```
+
+`publish_cli_password` is required by real CLI publish commands via `--pass` (not required for `--debug`).
 
 Signature precedence:
 
@@ -179,11 +184,12 @@ publo auth linkedin token-refresh
 Publish:
 
 ```bash
-publo publish linkedin --file ./post.md
+publo publish linkedin --file ./post.md --pass <publish-pass>
 ```
 
 Options:
 
+- `--pass <publish-pass>` (required for real publish, optional with `--debug`)
 - `--allow-duplicate`
 - `--debug`
 - `--add-signature`
@@ -226,11 +232,12 @@ If you change scopes, run `auth x login` again to issue a new token.
 Publish:
 
 ```bash
-publo publish x --file ./post.md
+publo publish x --file ./post.md --pass <publish-pass>
 ```
 
 Options:
 
+- `--pass <publish-pass>` (required for real publish, optional with `--debug`)
 - `--allow-duplicate`
 - `--allow-cashtag`
 - `--allow-length`

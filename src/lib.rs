@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, Mutex};
 use url::Url;
 use urlencoding::encode;
+use uuid::Uuid;
 
 mod api;
 mod auth;
@@ -181,13 +182,19 @@ struct JobRow {
     #[diesel(sql_type = Text)]
     id: String,
     #[diesel(sql_type = Text)]
-    batch_id: String,
+    action_group_id: String,
+    #[diesel(sql_type = Text)]
+    content_group_id: String,
+    #[diesel(sql_type = Text)]
+    asset_id: String,
     #[diesel(sql_type = Text)]
     kind: String,
     #[diesel(sql_type = Text)]
     status: String,
     #[diesel(sql_type = Nullable<Text>)]
     platform: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    publish_mode: Option<String>,
     #[diesel(sql_type = Text)]
     workspace_id: String,
     #[diesel(sql_type = Nullable<Text>)]
@@ -202,6 +209,8 @@ struct JobRow {
     ai_model: Option<String>,
     #[diesel(sql_type = Text)]
     tags: String,
+    #[diesel(sql_type = Text)]
+    selected_platforms: String,
     #[diesel(sql_type = Text)]
     file_path: String,
     #[diesel(sql_type = Nullable<Text>)]
@@ -222,6 +231,20 @@ struct JobRow {
     created_at: String,
     #[diesel(sql_type = Text)]
     updated_at: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct IdRow {
+    #[diesel(sql_type = Text)]
+    id: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct AssetLinkRow {
+    #[diesel(sql_type = Text)]
+    asset_id: String,
+    #[diesel(sql_type = Text)]
+    content_group_id: String,
 }
 
 
@@ -280,15 +303,7 @@ pub async fn run() -> ExitCode {
         }
         let host = args.host.unwrap_or_else(|| config.api_host.clone());
         let port = args.port.unwrap_or(config.api_port);
-        return api::run_server(
-            host,
-            port,
-            config.catalog_roots.clone(),
-            config.media_lookup_paths.clone(),
-            config.db_path.clone(),
-            config.pretty_json,
-        )
-        .await;
+        return api::run_server(host, port, config).await;
     }
 
     let result: Result<Value, AppError> = match cli.command {
@@ -345,6 +360,25 @@ pub async fn run() -> ExitCode {
 
 fn now_rfc3339_utc() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn validate_publish_pass(passed: Option<&str>, config: &RuntimeConfig) -> Result<(), AppError> {
+    let provided = passed.ok_or(AppError::Validation {
+        message: "Missing publish password.".to_string(),
+        suggestion: Some("Pass --pass <publish-pass> for real publish commands.".to_string()),
+        command: None,
+    })?;
+    if provided == config.publish_cli_password {
+        return Ok(());
+    }
+    Err(AppError::Validation {
+        message: "Invalid publish password.".to_string(),
+        suggestion: Some(
+            "Pass the correct --pass value, or update [security].publish_cli_password in config."
+                .to_string(),
+        ),
+        command: None,
+    })
 }
 
 fn validate_serve_requirements(config: &RuntimeConfig) -> Result<(), AppError> {
@@ -701,9 +735,7 @@ fn set_default_workspace_in_global_config(raw: &str, workspace_id: &str) -> Stri
 }
 
 fn generate_id() -> String {
-    let mut rng = rand::rng();
-    let bytes: [u8; 16] = rng.random();
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    Uuid::new_v4().to_string()
 }
 
 fn parse_run_at_to_utc(input: &str) -> Result<String, AppError> {
@@ -732,71 +764,250 @@ fn validate_operator_notes(
     Ok(())
 }
 
+fn selected_platforms_json(platforms: &[PlatformArg]) -> String {
+    let values: Vec<&str> = platforms.iter().map(|platform| platform.as_str()).collect();
+    serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn selected_platforms_from_json(raw: &str) -> Vec<String> {
+    let values: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for value in values {
+        let normalized = match value.as_str() {
+            "linkedin" => Some("linkedin"),
+            "x" => Some("x"),
+            _ => None,
+        };
+        if let Some(platform) = normalized
+            && !out.iter().any(|item| item == platform)
+        {
+            out.push(platform.to_string());
+        }
+    }
+    out
+}
+
+fn resolve_asset_link_for_paths(
+    conn: &mut SqliteConnection,
+    canonical_path: &str,
+    requested_path: &str,
+) -> Result<Option<AssetLinkRow>, AppError> {
+    let mut rows: Vec<AssetLinkRow> = sql_query(
+        "SELECT asset_id, content_group_id
+         FROM jobs
+         WHERE deleted_at IS NULL
+           AND (file_path = ? OR file_path = ?)
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1",
+    )
+    .bind::<Text, _>(canonical_path)
+    .bind::<Text, _>(requested_path)
+    .load(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to resolve existing asset linkage: {err}"),
+    })?;
+    Ok(rows.pop())
+}
+
+fn find_ready_intent_id_for_asset(
+    conn: &mut SqliteConnection,
+    asset_id: &str,
+) -> Result<Option<String>, AppError> {
+    let mut rows: Vec<IdRow> = sql_query(
+        "SELECT id
+         FROM jobs
+         WHERE asset_id = ?
+           AND status = 'ready'
+           AND platform IS NULL
+           AND deleted_at IS NULL
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1",
+    )
+    .bind::<Text, _>(asset_id)
+    .load(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to load ready intent job: {err}"),
+    })?;
+    Ok(rows.pop().map(|row| row.id))
+}
+
+fn find_job_id_by_asset_platform(
+    conn: &mut SqliteConnection,
+    asset_id: &str,
+    platform: &str,
+) -> Result<Option<String>, AppError> {
+    let mut rows: Vec<IdRow> = sql_query(
+        "SELECT id
+         FROM jobs
+         WHERE asset_id = ?
+           AND platform = ?
+           AND deleted_at IS NULL
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1",
+    )
+    .bind::<Text, _>(asset_id)
+    .bind::<Text, _>(platform)
+    .load(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to load existing job by asset+platform: {err}"),
+    })?;
+    Ok(rows.pop().map(|row| row.id))
+}
+
 fn job_ready(args: JobReadyArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     validate_operator_notes(args.by, &args.ai_note, &args.ai_model)?;
-    let parsed = parse_post_input(&args.file, config)?;
-    let final_text = if let Some(platform) = args.platform {
-        let signature_text = resolve_signature_text(config, to_publish_platform(platform), None)?;
-        if let Some(sig) = signature_text {
-            format!("{}{}", parsed.publish_text, sig)
-        } else {
-            parsed.publish_text
+    let mut selected_platforms: Vec<PlatformArg> = Vec::new();
+    for platform in &args.platform {
+        if !selected_platforms.contains(platform) {
+            selected_platforms.push(*platform);
         }
-    } else {
-        parsed.publish_text
-    };
-    let text_sha256 = compute_content_sha256(final_text.as_bytes());
+    }
+    let file_raw = fs::read_to_string(&args.file).map_err(|err| AppError::Io {
+        message: format!("Failed to read post file {}: {err}", args.file.display()),
+    })?;
+    let publish_text = publish::extract_publish_text(&file_raw);
+    let text_sha256 = compute_content_sha256(publish_text.as_bytes());
+    let file_sha256 = compute_content_sha256(file_raw.as_bytes());
     let file_path = fs::canonicalize(&args.file).unwrap_or(args.file.clone());
+    let file_path_str = file_path.display().to_string();
+    let requested_path_str = args.file.display().to_string();
+    let selected_platforms_json = selected_platforms_json(selected_platforms.as_slice());
+    let run_at_utc = match args.at.as_deref() {
+        Some(value) => Some(parse_run_at_to_utc(value)?),
+        None => None,
+    };
+    let workspace_id = args
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| config.paths.workspace_id.clone());
 
     let mut conn = open_db(config)?;
     let now = now_rfc3339_utc();
-    let id = generate_id();
-    let batch_id = generate_id();
-    sql_query(
-        "INSERT INTO jobs (
-            id, batch_id, kind, status, platform, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model,
-            file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
-            created_at, updated_at, deleted_at, version, synced_at, modified_by
-         ) VALUES (
-            ?, ?, 'catalog', 'ready', ?, ?, ?, ?, ?, ?, ?,
-            ?, NULL, NULL, NULL, 0, ?, ?, NULL,
-            ?, ?, NULL, 1, NULL, 'local'
-         )",
-    )
-    .bind::<Text, _>(&id)
-    .bind::<Text, _>(&batch_id)
-    .bind::<Nullable<Text>, _>(args.platform.map(|p| p.as_str()))
-    .bind::<Text, _>(&args.workspace_id)
-    .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
-    .bind::<Text, _>(args.by.as_str())
-    .bind::<Nullable<Text>, _>(args.user_note.as_deref())
-    .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
-    .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
-    .bind::<Text, _>(file_path.display().to_string())
-    .bind::<Text, _>(&parsed.file_sha256)
-    .bind::<Text, _>(&text_sha256)
-    .bind::<Text, _>(&now)
-    .bind::<Text, _>(&now)
-    .execute(&mut conn)
-    .map_err(|err| AppError::Io {
-        message: format!("Failed to insert ready job: {err}"),
-    })?;
+    let action_group_id = generate_id();
+    let existing_link = resolve_asset_link_for_paths(&mut conn, &file_path_str, &requested_path_str)?;
+    let asset_id = existing_link
+        .as_ref()
+        .map(|row| row.asset_id.clone())
+        .unwrap_or_else(generate_id);
+    let content_group_id = existing_link
+        .as_ref()
+        .map(|row| row.content_group_id.clone())
+        .unwrap_or_else(generate_id);
+
+    let mut created = false;
+    let job_id = if let Some(existing_ready_id) = find_ready_intent_id_for_asset(&mut conn, &asset_id)? {
+        sql_query(
+            "UPDATE jobs
+             SET action_group_id = ?,
+                 content_group_id = ?,
+                 kind = 'catalog',
+                 status = 'ready',
+                 platform = NULL,
+                 publish_mode = NULL,
+                 workspace_id = ?,
+                 owner_user_id = ?,
+                 operator = ?,
+                 user_note = ?,
+                 ai_note = ?,
+                 ai_model = ?,
+                 selected_platforms = ?,
+                 file_path = ?,
+                 run_at_utc = ?,
+                 timezone = ?,
+                 status_reason = NULL,
+                 attempt_count = 0,
+                 file_sha256 = ?,
+                 text_sha256 = ?,
+                 fingerprint = NULL,
+                 updated_at = ?,
+                 version = version + 1,
+                 synced_at = NULL,
+                 modified_by = 'local'
+             WHERE id = ?",
+        )
+        .bind::<Text, _>(&action_group_id)
+        .bind::<Text, _>(&content_group_id)
+        .bind::<Text, _>(&workspace_id)
+        .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
+        .bind::<Text, _>(args.by.as_str())
+        .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+        .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+        .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+        .bind::<Text, _>(&selected_platforms_json)
+        .bind::<Text, _>(&file_path_str)
+        .bind::<Nullable<Text>, _>(run_at_utc.as_deref())
+        .bind::<Nullable<Text>, _>(args.timezone.as_deref())
+        .bind::<Text, _>(&file_sha256)
+        .bind::<Text, _>(&text_sha256)
+        .bind::<Text, _>(&now)
+        .bind::<Text, _>(&existing_ready_id)
+        .execute(&mut conn)
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to update ready job: {err}"),
+        })?;
+        existing_ready_id
+    } else {
+        let id = generate_id();
+        sql_query(
+            "INSERT INTO jobs (
+                id, action_group_id, content_group_id, asset_id, kind, status, platform, publish_mode, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model, selected_platforms,
+                file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
+                created_at, updated_at, deleted_at, version, synced_at, modified_by
+             ) VALUES (
+                ?, ?, ?, ?, 'catalog', 'ready', NULL, NULL, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, NULL, 0, ?, ?, NULL,
+                ?, ?, NULL, 1, NULL, 'local'
+             )",
+        )
+        .bind::<Text, _>(&id)
+        .bind::<Text, _>(&action_group_id)
+        .bind::<Text, _>(&content_group_id)
+        .bind::<Text, _>(&asset_id)
+        .bind::<Text, _>(&workspace_id)
+        .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
+        .bind::<Text, _>(args.by.as_str())
+        .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+        .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+        .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+        .bind::<Text, _>(&selected_platforms_json)
+        .bind::<Text, _>(&file_path_str)
+        .bind::<Nullable<Text>, _>(run_at_utc.as_deref())
+        .bind::<Nullable<Text>, _>(args.timezone.as_deref())
+        .bind::<Text, _>(&file_sha256)
+        .bind::<Text, _>(&text_sha256)
+        .bind::<Text, _>(&now)
+        .bind::<Text, _>(&now)
+        .execute(&mut conn)
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to insert ready job: {err}"),
+        })?;
+        created = true;
+        id
+    };
 
     Ok(json!({
         "ok": true,
         "mode": "job_ready",
-        "job_id": id,
+        "job_id": job_id,
+        "created": created,
         "status": "ready",
-        "platform": args.platform.map(|p| p.as_str()),
-        "file_path": file_path.display().to_string(),
-        "workspace_id": args.workspace_id,
+        "action_group_id": action_group_id,
+        "content_group_id": content_group_id,
+        "asset_id": asset_id,
+        "platform": Value::Null,
+        "selected_platforms": selected_platforms.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        "publish_mode": Value::Null,
+        "run_at_utc": run_at_utc,
+        "timezone": args.timezone,
+        "file_path": file_path_str,
+        "workspace_id": workspace_id,
         "operator": args.by.as_str(),
-        "file_sha256": parsed.file_sha256,
+        "file_sha256": file_sha256,
         "text_sha256": text_sha256
     }))
 }
 
-fn job_unready(args: JobIdArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+pub(crate) fn job_unready(args: JobIdArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     let mut conn = open_db(config)?;
     let deleted = sql_query("DELETE FROM jobs WHERE id = ? AND status IN ('ready', 'blocked', 'canceled', 'disabled')")
         .bind::<Text, _>(&args.id)
@@ -822,15 +1033,25 @@ fn job_unready(args: JobIdArgs, config: &RuntimeConfig) -> Result<Value, AppErro
     }))
 }
 
-fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+pub(crate) fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     validate_operator_notes(args.by, &args.ai_note, &args.ai_model)?;
     let mut conn = open_db(config)?;
     let mut job = get_job_by_id(&mut conn, &args.id)?;
     let run_at_utc = parse_run_at_to_utc(&args.at)?;
     let timezone = args.timezone.clone();
+    let selected_from_decision = selected_platforms_from_json(&job.selected_platforms);
     let selected_platform = match (args.platform, job.platform.as_deref()) {
         (Some(p), _) => p.as_str().to_string(),
         (None, Some(existing)) => existing.to_string(),
+        (None, None) if selected_from_decision.len() == 1 => selected_from_decision[0].clone(),
+        (None, None) if selected_from_decision.len() > 1 => {
+            return Err(AppError::Validation {
+                message: "This decision has multiple platforms. Pass --platform when scheduling."
+                    .to_string(),
+                suggestion: Some("Use --platform linkedin or --platform x.".to_string()),
+                command: None,
+            })
+        }
         (None, None) => {
             return Err(AppError::Validation {
                 message: "This ready job has no platform. Pass --platform when scheduling."
@@ -841,6 +1062,10 @@ fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, 
         }
     };
     job.platform = Some(selected_platform);
+    job.publish_mode = match job.platform.as_deref() {
+        Some("x") => Some("single".to_string()),
+        _ => None,
+    };
 
     match preflight_job(&job, config) {
         Ok(preflight) => {
@@ -849,6 +1074,7 @@ fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, 
                 "UPDATE jobs
                  SET status = 'scheduled',
                      platform = ?,
+                     publish_mode = ?,
                      run_at_utc = ?,
                      timezone = ?,
                      status_reason = NULL,
@@ -866,6 +1092,7 @@ fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, 
                  WHERE id = ?",
             )
             .bind::<Nullable<Text>, _>(job.platform.as_deref())
+            .bind::<Nullable<Text>, _>(job.publish_mode.as_deref())
             .bind::<Text, _>(&run_at_utc)
             .bind::<Nullable<Text>, _>(timezone.as_deref())
             .bind::<Text, _>(args.by.as_str())
@@ -893,9 +1120,11 @@ fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, 
         Err(err) => {
             let now = now_rfc3339_utc();
             let reason = err.to_output().message;
-            let _ = sql_query(
+            sql_query(
                 "UPDATE jobs
                  SET status = 'blocked',
+                     platform = ?,
+                     publish_mode = ?,
                      status_reason = ?,
                      operator = ?,
                      user_note = COALESCE(?, user_note),
@@ -907,6 +1136,8 @@ fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, 
                      modified_by = 'local'
                  WHERE id = ?",
             )
+            .bind::<Nullable<Text>, _>(job.platform.as_deref())
+            .bind::<Nullable<Text>, _>(job.publish_mode.as_deref())
             .bind::<Text, _>(&reason)
             .bind::<Text, _>(args.by.as_str())
             .bind::<Nullable<Text>, _>(args.user_note.as_deref())
@@ -914,7 +1145,10 @@ fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, 
             .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
             .bind::<Text, _>(&now)
             .bind::<Text, _>(&args.id)
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .map_err(|update_err| AppError::Io {
+                message: format!("Failed to mark job as blocked after schedule preflight failure: {update_err}"),
+            })?;
 
             Ok(json!({
                 "ok": false,
@@ -928,15 +1162,13 @@ fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Result<Value, 
     }
 }
 
-fn job_unschedule(args: JobUnscheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+pub(crate) fn job_unschedule(args: JobUnscheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     let mut conn = open_db(config)?;
     let now = now_rfc3339_utc();
     let reason = args.reason.unwrap_or_else(|| "unscheduled manually".to_string());
     let changed = sql_query(
         "UPDATE jobs
          SET status='ready',
-             run_at_utc=NULL,
-             timezone=NULL,
              status_reason=?,
              updated_at=?,
              version=version+1,
@@ -962,25 +1194,34 @@ fn job_unschedule(args: JobUnscheduleArgs, config: &RuntimeConfig) -> Result<Val
     Ok(json!({"ok": true, "mode": "job_unschedule", "job": job_to_json(&job)}))
 }
 
-fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+pub(crate) fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     validate_operator_notes(args.by, &args.ai_note, &args.ai_model)?;
     let run_at_utc = parse_run_at_to_utc(&args.at)?;
     let file_path = fs::canonicalize(&args.file).unwrap_or(args.file.clone());
     let platform = args.platform.as_str();
+    let workspace_id = args
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| config.paths.workspace_id.clone());
+    let selected_platforms_json = selected_platforms_json(&[args.platform]);
 
     let preflight_input = JobRow {
         id: String::new(),
-        batch_id: String::new(),
+        action_group_id: String::new(),
+        content_group_id: String::new(),
+        asset_id: String::new(),
         kind: "catalog".to_string(),
         status: "ready".to_string(),
         platform: Some(platform.to_string()),
-        workspace_id: args.workspace_id.clone(),
+        publish_mode: publish_mode_for_platform(args.platform).map(str::to_string),
+        workspace_id: workspace_id.clone(),
         owner_user_id: args.owner_user_id.clone(),
         operator: Some(args.by.as_str().to_string()),
         user_note: args.user_note.clone(),
         ai_note: args.ai_note.clone(),
         ai_model: args.ai_model.clone(),
         tags: "[]".to_string(),
+        selected_platforms: selected_platforms_json.clone(),
         file_path: file_path.display().to_string(),
         run_at_utc: None,
         timezone: None,
@@ -997,89 +1238,136 @@ fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig) -> Result<
         Ok(preflight) => {
             let mut conn = open_db(config)?;
             let now = now_rfc3339_utc();
-            let id = generate_id();
-            let batch_id = generate_id();
-            sql_query(
-                "INSERT INTO jobs (
-                    id, batch_id, kind, status, platform, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model,
-                    file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
-                    created_at, updated_at, deleted_at, version, synced_at, modified_by
-                 ) VALUES (
-                    ?, ?, 'catalog', 'scheduled', ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, NULL, 0, ?, ?, ?,
-                    ?, ?, NULL, 1, NULL, 'local'
-                 )",
+            let action_group_id = generate_id();
+            let file_path_str = file_path.display().to_string();
+            let requested_path_str = args.file.display().to_string();
+            let existing_link =
+                resolve_asset_link_for_paths(&mut conn, &file_path_str, &requested_path_str)?;
+            let asset_id = existing_link
+                .as_ref()
+                .map(|row| row.asset_id.clone())
+                .unwrap_or_else(generate_id);
+            let content_group_id = existing_link
+                .as_ref()
+                .map(|row| row.content_group_id.clone())
+                .unwrap_or_else(generate_id);
+
+            let changed = sql_query(
+                "UPDATE jobs
+                 SET action_group_id = ?,
+                     content_group_id = ?,
+                     kind = 'catalog',
+                     status = 'scheduled',
+                     platform = ?,
+                     publish_mode = ?,
+                     workspace_id = ?,
+                     owner_user_id = ?,
+                     operator = ?,
+                     user_note = ?,
+                     ai_note = ?,
+                     ai_model = ?,
+                     selected_platforms = ?,
+                     file_path = ?,
+                     run_at_utc = ?,
+                     timezone = ?,
+                     status_reason = NULL,
+                     attempt_count = 0,
+                     file_sha256 = ?,
+                     text_sha256 = ?,
+                     fingerprint = ?,
+                     updated_at = ?,
+                     version = version + 1,
+                     synced_at = NULL,
+                     modified_by = 'local'
+                 WHERE asset_id = ?
+                   AND platform = ?
+                   AND deleted_at IS NULL",
             )
-            .bind::<Text, _>(&id)
-            .bind::<Text, _>(&batch_id)
-            .bind::<Nullable<Text>, _>(Some(platform))
-            .bind::<Text, _>(&args.workspace_id)
+            .bind::<Text, _>(&action_group_id)
+            .bind::<Text, _>(&content_group_id)
+            .bind::<Text, _>(platform)
+            .bind::<Nullable<Text>, _>(publish_mode_for_platform(args.platform))
+            .bind::<Text, _>(&workspace_id)
             .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
             .bind::<Text, _>(args.by.as_str())
             .bind::<Nullable<Text>, _>(args.user_note.as_deref())
             .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
             .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
-            .bind::<Text, _>(file_path.display().to_string())
+            .bind::<Text, _>(&selected_platforms_json)
+            .bind::<Text, _>(&file_path_str)
             .bind::<Text, _>(&run_at_utc)
             .bind::<Nullable<Text>, _>(args.timezone.as_deref())
             .bind::<Text, _>(&preflight.file_sha256)
             .bind::<Text, _>(&preflight.text_sha256)
             .bind::<Text, _>(&preflight.fingerprint)
             .bind::<Text, _>(&now)
-            .bind::<Text, _>(&now)
+            .bind::<Text, _>(&asset_id)
+            .bind::<Text, _>(platform)
             .execute(&mut conn)
             .map_err(|err| AppError::Io {
-                message: format!("Failed to add scheduled job: {err}"),
+                message: format!("Failed to update scheduled job: {err}"),
             })?;
-            let job = get_job_by_id(&mut conn, &id)?;
+
+            let job_id = if changed > 0 {
+                find_job_id_by_asset_platform(&mut conn, &asset_id, platform)?
+                    .ok_or_else(|| AppError::Io {
+                        message: "Updated scheduled job but could not read it back.".to_string(),
+                    })?
+            } else {
+                let id = generate_id();
+                sql_query(
+                    "INSERT INTO jobs (
+                        id, action_group_id, content_group_id, asset_id, kind, status, platform, publish_mode, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model, selected_platforms,
+                        file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
+                        created_at, updated_at, deleted_at, version, synced_at, modified_by
+                     ) VALUES (
+                        ?, ?, ?, ?, 'catalog', 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, NULL, 0, ?, ?, ?,
+                        ?, ?, NULL, 1, NULL, 'local'
+                     )",
+                )
+                .bind::<Text, _>(&id)
+                .bind::<Text, _>(&action_group_id)
+                .bind::<Text, _>(&content_group_id)
+                .bind::<Text, _>(&asset_id)
+                .bind::<Text, _>(platform)
+                .bind::<Nullable<Text>, _>(publish_mode_for_platform(args.platform))
+                .bind::<Text, _>(&workspace_id)
+                .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
+                .bind::<Text, _>(args.by.as_str())
+                .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+                .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+                .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+                .bind::<Text, _>(&selected_platforms_json)
+                .bind::<Text, _>(&file_path_str)
+                .bind::<Text, _>(&run_at_utc)
+                .bind::<Nullable<Text>, _>(args.timezone.as_deref())
+                .bind::<Text, _>(&preflight.file_sha256)
+                .bind::<Text, _>(&preflight.text_sha256)
+                .bind::<Text, _>(&preflight.fingerprint)
+                .bind::<Text, _>(&now)
+                .bind::<Text, _>(&now)
+                .execute(&mut conn)
+                .map_err(|err| AppError::Io {
+                    message: format!("Failed to add scheduled job: {err}"),
+                })?;
+                id
+            };
+            let job = get_job_by_id(&mut conn, &job_id)?;
             Ok(json!({
                 "ok": true,
                 "mode": "job_add_schedule",
+                "created": changed == 0,
                 "job": job_to_json(&job),
                 "preflight": preflight.details
             }))
         }
         Err(err) => {
-            let mut conn = open_db(config)?;
-            let now = now_rfc3339_utc();
-            let id = generate_id();
-            let batch_id = generate_id();
             let reason = err.to_output().message;
-            sql_query(
-                "INSERT INTO jobs (
-                    id, batch_id, kind, status, platform, workspace_id, owner_user_id, operator, user_note, ai_note, ai_model,
-                    file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
-                    created_at, updated_at, deleted_at, version, synced_at, modified_by
-                 ) VALUES (
-                    ?, ?, 'catalog', 'blocked', ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, 0, NULL, NULL, NULL,
-                    ?, ?, NULL, 1, NULL, 'local'
-                 )",
-            )
-            .bind::<Text, _>(&id)
-            .bind::<Text, _>(&batch_id)
-            .bind::<Nullable<Text>, _>(Some(platform))
-            .bind::<Text, _>(&args.workspace_id)
-            .bind::<Nullable<Text>, _>(args.owner_user_id.as_deref())
-            .bind::<Text, _>(args.by.as_str())
-            .bind::<Nullable<Text>, _>(args.user_note.as_deref())
-            .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
-            .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
-            .bind::<Text, _>(file_path.display().to_string())
-            .bind::<Text, _>(&run_at_utc)
-            .bind::<Nullable<Text>, _>(args.timezone.as_deref())
-            .bind::<Text, _>(&reason)
-            .bind::<Text, _>(&now)
-            .bind::<Text, _>(&now)
-            .execute(&mut conn)
-            .map_err(|db_err| AppError::Io {
-                message: format!("Failed to add blocked scheduled job: {db_err}"),
-            })?;
-            let job = get_job_by_id(&mut conn, &id)?;
             Ok(json!({
                 "ok": false,
                 "mode": "job_add_schedule",
-                "job": job_to_json(&job),
+                "job": Value::Null,
                 "reason": reason,
                 "error": err.to_output()
             }))
@@ -1087,7 +1375,7 @@ fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig) -> Result<
     }
 }
 
-fn job_cancel(args: JobCancelArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+pub(crate) fn job_cancel(args: JobCancelArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     let mut conn = open_db(config)?;
     let now = now_rfc3339_utc();
     let reason = args.reason.unwrap_or_else(|| "canceled manually".to_string());
@@ -1120,10 +1408,32 @@ fn job_cancel(args: JobCancelArgs, config: &RuntimeConfig) -> Result<Value, AppE
 }
 
 fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    if let Some(status) = args.status.as_deref()
+        && !matches!(
+            status,
+            "ready" | "scheduled" | "publishing" | "published" | "failed" | "blocked" | "canceled" | "disabled"
+        )
+    {
+        return Err(AppError::Validation {
+            message: format!("Invalid --status value: {status}"),
+            suggestion: Some(
+                "Use one of: ready, scheduled, publishing, published, failed, blocked, canceled, disabled."
+                    .to_string(),
+            ),
+            command: None,
+        });
+    }
+    if args.limit == 0 {
+        return Err(AppError::Validation {
+            message: "--limit must be >= 1.".to_string(),
+            suggestion: Some("Use --limit 1 or greater.".to_string()),
+            command: None,
+        });
+    }
     let mut conn = open_db(config)?;
     let rows: Vec<JobRow> = match (args.status.as_ref(), args.platform) {
         (Some(status), Some(platform)) => sql_query(
-            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              WHERE status = ? AND platform = ?
              ORDER BY COALESCE(run_at_utc, created_at) ASC
@@ -1134,7 +1444,7 @@ fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError
         .bind::<Integer, _>(args.limit as i32)
         .load(&mut conn),
         (Some(status), None) => sql_query(
-            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              WHERE status = ?
              ORDER BY COALESCE(run_at_utc, created_at) ASC
@@ -1144,7 +1454,7 @@ fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError
         .bind::<Integer, _>(args.limit as i32)
         .load(&mut conn),
         (None, Some(platform)) => sql_query(
-            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              WHERE platform = ?
              ORDER BY COALESCE(run_at_utc, created_at) ASC
@@ -1154,7 +1464,7 @@ fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError
         .bind::<Integer, _>(args.limit as i32)
         .load(&mut conn),
         (None, None) => sql_query(
-            "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              ORDER BY COALESCE(run_at_utc, created_at) ASC
              LIMIT ?",
@@ -1201,7 +1511,7 @@ fn job_run_debug(args: JobRunDebugArgs, config: &RuntimeConfig) -> Result<Value,
 
 fn get_job_by_id(conn: &mut SqliteConnection, id: &str) -> Result<JobRow, AppError> {
     let mut rows: Vec<JobRow> = sql_query(
-        "SELECT id,batch_id,kind,status,platform,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
          FROM jobs
          WHERE id = ?
          LIMIT 1",
@@ -1219,18 +1529,69 @@ fn get_job_by_id(conn: &mut SqliteConnection, id: &str) -> Result<JobRow, AppErr
     })
 }
 
-fn to_publish_platform(platform: PlatformArg) -> PublishPlatformKind {
-    match platform {
-        PlatformArg::Linkedin => PublishPlatformKind::Linkedin,
-        PlatformArg::X => PublishPlatformKind::X,
-    }
-}
-
 struct JobPreflightResult {
     file_sha256: String,
     text_sha256: String,
     fingerprint: String,
     details: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SchedulePreflightSnapshot {
+    pub(crate) file_sha256: String,
+    pub(crate) text_sha256: String,
+    pub(crate) fingerprint: String,
+    pub(crate) details: Value,
+}
+
+pub(crate) fn job_preflight_for_file_platform(
+    file: PathBuf,
+    platform: PlatformArg,
+    workspace_id: String,
+    owner_user_id: Option<String>,
+    by: OperatorArg,
+    user_note: Option<String>,
+    ai_note: Option<String>,
+    ai_model: Option<String>,
+    config: &RuntimeConfig,
+) -> Result<SchedulePreflightSnapshot, AppError> {
+    validate_operator_notes(by, &ai_note, &ai_model)?;
+    let file_path = fs::canonicalize(&file).unwrap_or(file.clone());
+    let preflight_input = JobRow {
+        id: String::new(),
+        action_group_id: String::new(),
+        content_group_id: String::new(),
+        asset_id: String::new(),
+        kind: "catalog".to_string(),
+        status: "ready".to_string(),
+        platform: Some(platform.as_str().to_string()),
+        publish_mode: publish_mode_for_platform(platform).map(str::to_string),
+        workspace_id,
+        owner_user_id,
+        operator: Some(by.as_str().to_string()),
+        user_note,
+        ai_note,
+        ai_model,
+        tags: "[]".to_string(),
+        selected_platforms: "[]".to_string(),
+        file_path: file_path.display().to_string(),
+        run_at_utc: None,
+        timezone: None,
+        status_reason: None,
+        attempt_count: 0,
+        file_sha256: None,
+        text_sha256: None,
+        fingerprint: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let preflight = preflight_job(&preflight_input, config)?;
+    Ok(SchedulePreflightSnapshot {
+        file_sha256: preflight.file_sha256,
+        text_sha256: preflight.text_sha256,
+        fingerprint: preflight.fingerprint,
+        details: preflight.details,
+    })
 }
 
 fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightResult, AppError> {
@@ -1267,6 +1628,13 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
             })
         }
         Some("x") => {
+            if matches!(job.publish_mode.as_deref(), Some("thread")) {
+                return Err(AppError::Validation {
+                    message: "X thread publish mode is not implemented yet.".to_string(),
+                    suggestion: Some("Use X single mode for now.".to_string()),
+                    command: None,
+                });
+            }
             publish::validate_x_media_count(parsed.media_paths.len())?;
             let _auth = load_x_auth()?;
             let signature_text = resolve_signature_text(config, PublishPlatformKind::X, None)?;
@@ -1323,10 +1691,13 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
 fn job_to_json(job: &JobRow) -> Value {
     json!({
         "id": job.id,
-        "batch_id": job.batch_id,
+        "action_group_id": job.action_group_id,
+        "content_group_id": job.content_group_id,
+        "asset_id": job.asset_id,
         "kind": job.kind,
         "status": job.status,
         "platform": job.platform,
+        "publish_mode": job.publish_mode,
         "workspace_id": job.workspace_id,
         "owner_user_id": job.owner_user_id,
         "operator": job.operator,
@@ -1334,6 +1705,7 @@ fn job_to_json(job: &JobRow) -> Value {
         "ai_note": job.ai_note,
         "ai_model": job.ai_model,
         "tags": parse_tags_json(&job.tags),
+        "selected_platforms": selected_platforms_from_json(&job.selected_platforms),
         "file_path": job.file_path,
         "run_at_utc": job.run_at_utc,
         "timezone": job.timezone,
@@ -1345,6 +1717,13 @@ fn job_to_json(job: &JobRow) -> Value {
         "created_at": job.created_at,
         "updated_at": job.updated_at
     })
+}
+
+fn publish_mode_for_platform(platform: PlatformArg) -> Option<&'static str> {
+    match platform {
+        PlatformArg::X => Some("single"),
+        PlatformArg::Linkedin => None,
+    }
 }
 
 fn parse_tags_json(raw: &str) -> Value {
@@ -1381,7 +1760,7 @@ fn show_linkedin_auth_guide() -> Result<Value, AppError> {
     } else {
         json!({
             "message": "LinkedIn auth appears ready.",
-            "command": "publo publish linkedin --file <path>"
+            "command": "publo publish linkedin --file <path> --pass <publish-pass>"
         })
     };
 
@@ -1511,7 +1890,7 @@ async fn start_x_login(config: &RuntimeConfig) -> Result<Value, AppError> {
             "token_type": auth_result.token_type,
             "next": {
                 "message": "X auth completed. You can publish now.",
-                "command": "publo publish x --file <path>"
+                "command": "publo publish x --file <path> --pass <publish-pass>"
             }
         })),
         Err(err) => Err(err),
@@ -1584,7 +1963,7 @@ async fn exchange_x_code_manual(
         "token_type": auth_result.token_type,
         "next": {
             "message": "X auth exchange completed. You can publish now.",
-            "command": "publo publish x --file <path>"
+            "command": "publo publish x --file <path> --pass <publish-pass>"
         }
     }))
 }
@@ -2005,7 +2384,7 @@ async fn start_linkedin_login(config: &RuntimeConfig) -> Result<Value, AppError>
             "name": auth_result.profile_name,
             "next": {
                 "message": "LinkedIn auth completed. You can publish now.",
-                "command": "publo publish linkedin --file <path>"
+                "command": "publo publish linkedin --file <path> --pass <publish-pass>"
             }
         })),
         Err(err) => Err(err),
@@ -2211,7 +2590,7 @@ async fn resolve_linkedin_author_urn(config: &RuntimeConfig) -> Result<Value, Ap
         "author_urn_saved_to_env": true,
         "next": {
             "message": "Author URN is ready. You can publish now.",
-            "command": "publo publish linkedin --file <path>"
+            "command": "publo publish linkedin --file <path> --pass <publish-pass>"
         }
     }))
 }
@@ -2373,6 +2752,9 @@ async fn run_linkedin_token_refresh(config: &RuntimeConfig) -> Result<Value, App
 }
 
 async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    if !args.debug {
+        validate_publish_pass(args.pass.as_deref(), config)?;
+    }
     if !args.file.exists() {
         return Err(AppError::Validation {
             message: format!("Content file does not exist: {}", args.file.display()),
@@ -2678,6 +3060,9 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
 }
 
 async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    if !args.debug {
+        validate_publish_pass(args.pass.as_deref(), config)?;
+    }
     if !args.file.exists() {
         return Err(AppError::Validation {
             message: format!("Content file does not exist: {}", args.file.display()),

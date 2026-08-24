@@ -6,6 +6,7 @@ import {
   FolderKanban,
   Settings2,
   Sparkles,
+  SunMoon,
 } from "lucide-react"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
@@ -30,7 +31,7 @@ const teams = [
 
 const pages: { key: AppPage; label: string; icon: React.ReactNode }[] = [
   { key: "catalog", label: "Catalog", icon: <FolderKanban /> },
-  { key: "ready", label: "Ready", icon: <CheckCheck /> },
+  { key: "ready", label: "Decision Queue", icon: <CheckCheck /> },
   { key: "scheduled", label: "Scheduled", icon: <CalendarClock /> },
 ]
 
@@ -44,6 +45,29 @@ export function AppSidebar({
   onPageChange,
   ...props
 }: AppSidebarProps) {
+  const [theme, setTheme] = React.useState<"light" | "dark">("light")
+
+  React.useEffect(() => {
+    const saved = window.localStorage.getItem("publo.theme")
+    if (saved === "light" || saved === "dark") {
+      setTheme(saved)
+      document.documentElement.classList.toggle("dark", saved === "dark")
+      return
+    }
+
+    const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches
+    const initial: "light" | "dark" = systemDark ? "dark" : "light"
+    setTheme(initial)
+    document.documentElement.classList.toggle("dark", initial === "dark")
+  }, [])
+
+  const toggleTheme = React.useCallback(() => {
+    const next: "light" | "dark" = theme === "dark" ? "light" : "dark"
+    setTheme(next)
+    document.documentElement.classList.toggle("dark", next === "dark")
+    window.localStorage.setItem("publo.theme", next)
+  }, [theme])
+
   return (
     <Sidebar collapsible="icon" variant="inset" {...props}>
       <SidebarHeader>
@@ -89,6 +113,15 @@ export function AppSidebar({
                 <SidebarMenuButton tooltip="Settings">
                   <Settings2 />
                   <span>Settings</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  tooltip={theme === "dark" ? "Switch to light" : "Switch to dark"}
+                  render={<button type="button" onClick={toggleTheme} />}
+                >
+                  <SunMoon />
+                  <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
