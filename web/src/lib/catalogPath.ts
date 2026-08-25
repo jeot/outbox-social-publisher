@@ -35,6 +35,12 @@ export function tooltipCatalogPath(
   return relative.length > 0 ? `${rootName}/${relative}` : rootName
 }
 
+export function fileNameFromPath(path: string | null): string {
+  if (!path) return ""
+  const parts = path.split(/[\\/]/).filter((part) => part.length > 0)
+  return parts[parts.length - 1] ?? path
+}
+
 function longestMatchingRoot(path: string, roots: string[]): string | null {
   let best: string | null = null
   for (const root of roots) {

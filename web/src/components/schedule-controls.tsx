@@ -29,7 +29,7 @@ export function ScheduleControls({
   onCustomClick,
 }: ScheduleControlsProps) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
       <DropdownMenu>
         <DropdownMenuTrigger
           render={<Button size="icon-sm" variant="outline" disabled={disabled} />}

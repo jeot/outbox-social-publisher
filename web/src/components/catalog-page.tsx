@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react"
-import { PreviewCard } from "@/components/preview-card"
+import { FileTree } from "@/components/file-tree"
 import { RawFileCard } from "@/components/raw-file-card"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
 
-const PREVIEW_PANE_MIN_WIDTH = 320
+const TREE_PANE_MIN_WIDTH = 280
 const RAW_PANE_MIN_WIDTH = 320
 const PANE_DIVIDER_WIDTH = 16
 const PANE_GAP = 16
@@ -12,23 +12,17 @@ const TOTAL_HORIZONTAL_GAP = PANE_GAP * 2
 const CONTENT_SIDE_PADDING = 32
 
 export function CatalogPage() {
-  const catalogPreviewPaneWidth = useUiStore((state) => state.catalogPreviewPaneWidth)
-  const setCatalogPreviewPaneWidth = useUiStore(
+  const catalogTreePaneWidth = useUiStore((state) => state.catalogPreviewPaneWidth)
+  const setCatalogTreePaneWidth = useUiStore(
     (state) => state.setCatalogPreviewPaneWidth
   )
 
   const selectedFilePath = useCatalogStore((state) => state.selectedFilePath)
+  const selectedFileContent = useCatalogStore((state) => state.selectedFileContent)
   const selectedFileReady = useCatalogStore((state) => state.selectedFileReady)
   const readyActionLoading = useCatalogStore((state) => state.readyActionLoading)
   const markSelectedReady = useCatalogStore((state) => state.markSelectedReady)
   const unmarkSelectedReady = useCatalogStore((state) => state.unmarkSelectedReady)
-  const selectedFileContent = useCatalogStore((state) => state.selectedFileContent)
-  const selectedPublishText = useCatalogStore((state) => state.selectedPublishText)
-  const selectedPreviewMedia = useCatalogStore((state) => state.selectedPreviewMedia)
-  const selectedPreviewIssues = useCatalogStore((state) => state.selectedPreviewIssues)
-  const selectedPreviewPublishable = useCatalogStore(
-    (state) => state.selectedPreviewPublishable
-  )
   const selectedFileLoading = useCatalogStore((state) => state.selectedFileLoading)
   const selectedFileError = useCatalogStore((state) => state.selectedFileError)
 
@@ -38,14 +32,14 @@ export function CatalogPage() {
   const availableCatalogWidth = Math.max(0, catalogContentWidth - CONTENT_SIDE_PADDING)
   const canUseHorizontalCatalogLayout =
     availableCatalogWidth >=
-    PREVIEW_PANE_MIN_WIDTH + RAW_PANE_MIN_WIDTH + PANE_DIVIDER_WIDTH + TOTAL_HORIZONTAL_GAP
-  const maxPreviewWidth = Math.max(
-    PREVIEW_PANE_MIN_WIDTH,
+    TREE_PANE_MIN_WIDTH + RAW_PANE_MIN_WIDTH + PANE_DIVIDER_WIDTH + TOTAL_HORIZONTAL_GAP
+  const maxTreeWidth = Math.max(
+    TREE_PANE_MIN_WIDTH,
     availableCatalogWidth - RAW_PANE_MIN_WIDTH - PANE_DIVIDER_WIDTH - TOTAL_HORIZONTAL_GAP
   )
-  const effectivePreviewPaneWidth = Math.max(
-    PREVIEW_PANE_MIN_WIDTH,
-    Math.min(catalogPreviewPaneWidth, maxPreviewWidth)
+  const effectiveTreePaneWidth = Math.max(
+    TREE_PANE_MIN_WIDTH,
+    Math.min(catalogTreePaneWidth, maxTreeWidth)
   )
 
   useEffect(() => {
@@ -67,30 +61,16 @@ export function CatalogPage() {
         ref={catalogContentRef}
         className={`flex min-h-full w-full p-4 ${canUseHorizontalCatalogLayout ? "flex-row items-start gap-1" : "flex-col gap-4"}`}
       >
-        <PreviewCard
-          selectedFilePath={selectedFilePath}
-          selectedPreviewPublishable={selectedPreviewPublishable}
-          selectedFileReady={selectedFileReady}
-          readyActionLoading={readyActionLoading}
-          onToggleReady={() => {
-            if (selectedFileReady) {
-              void unmarkSelectedReady()
-              return
-            }
-            void markSelectedReady()
-          }}
-          selectedFileLoading={selectedFileLoading}
-          selectedFileError={selectedFileError}
-          selectedPublishText={selectedPublishText}
-          selectedPreviewMedia={selectedPreviewMedia}
-          selectedPreviewIssues={selectedPreviewIssues}
-          className={`flex flex-col rounded-xl border bg-card ${canUseHorizontalCatalogLayout ? "shrink-0" : "flex-1"}`}
+        <section
+          className={`overflow-hidden rounded-xl border bg-card ${canUseHorizontalCatalogLayout ? "shrink-0" : "flex-1"}`}
           style={
             canUseHorizontalCatalogLayout
-              ? { width: `min(100%, ${effectivePreviewPaneWidth}px)` }
+              ? { width: `min(100%, ${effectiveTreePaneWidth}px)` }
               : undefined
           }
-        />
+        >
+          <FileTree />
+        </section>
 
         <div
           className={`relative w-4 shrink-0 ${canUseHorizontalCatalogLayout ? "sticky top-0 block h-[calc(100svh-3.5rem)]" : "hidden"}`}
@@ -102,14 +82,14 @@ export function CatalogPage() {
             onMouseDown={(event) => {
               event.preventDefault()
               const startX = event.clientX
-              const startWidth = effectivePreviewPaneWidth
+              const startWidth = effectiveTreePaneWidth
               const onMove = (moveEvent: MouseEvent) => {
                 const delta = moveEvent.clientX - startX
                 const next = Math.max(
-                  PREVIEW_PANE_MIN_WIDTH,
-                  Math.min(maxPreviewWidth, startWidth + delta)
+                  TREE_PANE_MIN_WIDTH,
+                  Math.min(maxTreeWidth, startWidth + delta)
                 )
-                setCatalogPreviewPaneWidth(next)
+                setCatalogTreePaneWidth(next)
               }
               const onUp = () => {
                 window.removeEventListener("mousemove", onMove)
@@ -131,6 +111,14 @@ export function CatalogPage() {
         <RawFileCard
           selectedFilePath={selectedFilePath}
           selectedFileReady={selectedFileReady}
+          readyActionLoading={readyActionLoading}
+          onToggleReady={() => {
+            if (selectedFileReady) {
+              void unmarkSelectedReady()
+              return
+            }
+            void markSelectedReady()
+          }}
           selectedFileLoading={selectedFileLoading}
           selectedFileError={selectedFileError}
           selectedFileContent={selectedFileContent}

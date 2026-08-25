@@ -12,7 +12,7 @@ import {
   type JobItem,
   unreadyJob,
 } from "@/lib/jobsApi"
-import { displayCatalogPath, tooltipCatalogPath } from "@/lib/catalogPath"
+import { displayCatalogPath, fileNameFromPath } from "@/lib/catalogPath"
 import { SCHEDULE_PRESETS, type SchedulePreset } from "@/lib/schedulePresets"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
@@ -57,7 +57,9 @@ export function DecisionPage() {
   const [customTimeById, setCustomTimeById] = useState<Record<string, string>>({})
   const [customDialogJobId, setCustomDialogJobId] = useState<string | null>(null)
   const [platformById, setPlatformById] = useState<Record<string, PlatformSelection>>({})
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null)
   const setActivePage = useUiStore((state) => state.setActivePage)
+  const setPreviewPanelOpen = useUiStore((state) => state.setCatalogPanelOpen)
   const roots = useCatalogStore((state) => state.roots)
   const loadCatalog = useCatalogStore((state) => state.loadCatalog)
   const revealFileInTree = useCatalogStore((state) => state.revealFileInTree)
@@ -144,6 +146,16 @@ export function DecisionPage() {
       await selectFile(path)
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to open file in catalog")
+    }
+  }
+
+  const selectRowForPreview = async (job: JobItem) => {
+    setSelectedRowId(job.id)
+    setPreviewPanelOpen(true)
+    try {
+      await selectFile(job.file_path)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to load preview")
     }
   }
 
@@ -267,13 +279,13 @@ export function DecisionPage() {
 
           {error ? <p className="mb-3 text-sm text-destructive">{error}</p> : null}
 
-          <Table>
+          <Table className="table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead>File</TableHead>
-                <TableHead>Platforms</TableHead>
-                <TableHead>Schedule</TableHead>
-                <TableHead>Actions</TableHead>
+                <TableHead className="w-[15rem] min-w-[15rem]">File</TableHead>
+                <TableHead className="w-[10rem]">Platforms</TableHead>
+                <TableHead className="w-[18rem]">Schedule</TableHead>
+                <TableHead className="w-[12rem]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -298,15 +310,20 @@ export function DecisionPage() {
                       x: fallbackSelected.includes("x") || job.platform === "x",
                     }
                     const selection = platformById[job.id] ?? fallbackSelection
-                    const displayPath = displayCatalogPath(job.file_path, rootPaths)
-                    const hoverPath = tooltipCatalogPath(job.file_path, rootPaths)
+                    const fileName = fileNameFromPath(job.file_path)
 
                     return (
-                      <TableRow key={job.id}>
-                        <TableCell className="max-w-[340px] truncate" title={hoverPath}>
+                      <TableRow
+                        key={job.id}
+                        className={`cursor-pointer ${selectedRowId === job.id ? "bg-blue-100/70 ring-1 ring-inset ring-blue-300 dark:bg-blue-950/40 dark:ring-blue-700 hover:bg-blue-100/70" : "hover:bg-muted/40"}`}
+                        onClick={() => {
+                          void selectRowForPreview(job)
+                        }}
+                      >
+                        <TableCell className="w-[15rem] min-w-[15rem] align-top">
                           <div className="flex flex-col gap-1">
-                            <span className="truncate">{displayPath}</span>
-                            <div className="flex gap-2">
+                            <span className="whitespace-normal break-words">{fileName}</span>
+                            <div className="flex flex-wrap gap-2">
                               <Badge
                                 // className={
                                 //   isReady
@@ -330,7 +347,7 @@ export function DecisionPage() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-2">
                             <Button
                               size="sm"
                               variant={selection.linkedin ? "default" : "outline"}
@@ -379,7 +396,7 @@ export function DecisionPage() {
                           />
                         </TableCell>
                         <TableCell>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
                             {canScheduleFromSuggestion(job, selection) ? (
                               <Button
                                 size="icon-sm"
@@ -569,10 +586,11 @@ function formatRunAtLocal(rawUtc: string): string {
     minute: "2-digit",
     hour12: true,
   }).format(date)
-  const weekdayPart = new Intl.DateTimeFormat(undefined, {
-    weekday: "short",
-  }).format(date)
-  return `${datePart}, ${timePart} (${weekdayPart})`
+  return `${datePart}, ${timePart}`
+  // const weekdayPart = new Intl.DateTimeFormat(undefined, {
+  //   weekday: "short",
+  // }).format(date)
+  // return `${datePart}, ${timePart} (${weekdayPart})`
 }
 
 function isPastRunAt(rawUtc: string | null): boolean {

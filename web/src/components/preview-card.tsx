@@ -3,10 +3,9 @@ import type { MediaPreview } from "@/store/catalogStore"
 
 type PreviewCardProps = {
   selectedFilePath: string | null
+  selectedFileName: string
+  selectedFileDisplayPath: string
   selectedPreviewPublishable: boolean
-  selectedFileReady: boolean
-  readyActionLoading: boolean
-  onToggleReady: () => void
   selectedFileLoading: boolean
   selectedFileError: string | null
   selectedPublishText: string
@@ -18,10 +17,9 @@ type PreviewCardProps = {
 
 export function PreviewCard({
   selectedFilePath,
+  selectedFileName,
+  selectedFileDisplayPath,
   selectedPreviewPublishable,
-  selectedFileReady,
-  readyActionLoading,
-  onToggleReady,
   selectedFileLoading,
   selectedFileError,
   selectedPublishText,
@@ -52,20 +50,6 @@ export function PreviewCard({
               : "No file selected"}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onToggleReady}
-          disabled={!selectedFilePath || readyActionLoading}
-          className="rounded-md border px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 hover:bg-accent"
-        >
-          {readyActionLoading
-            ? selectedFileReady
-              ? "Unreadying..."
-              : "Marking..."
-            : selectedFileReady
-              ? "Unready"
-              : "Mark Ready"}
-        </button>
       </div>
       <div className="space-y-4 p-4">
         {selectedFileLoading ? (
@@ -95,7 +79,15 @@ export function PreviewCard({
               </div>
             </div>
 
-            <div className="border border-border">
+            <div className="space-y-2 rounded-md border bg-muted/20 p-3 text-xs">
+              <div>
+                <p className="font-medium text-muted-foreground">File Name</p>
+                <p className="break-all">{selectedFileName || "-"}</p>
+              </div>
+              <div>
+                <p className="font-medium text-muted-foreground">File Path</p>
+                <p className="break-all">{selectedFileDisplayPath || "-"}</p>
+              </div>
             </div>
 
             <div>
@@ -139,7 +131,7 @@ export function PreviewCard({
           </>
         ) : (
           <p className="text-sm text-muted-foreground">
-            Select a file from Catalog to preview publish content.
+            Select an item to preview.
           </p>
         )}
       </div>

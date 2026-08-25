@@ -50,6 +50,7 @@ type CatalogState = {
   selectedFileError: string | null
   loadCatalog: () => Promise<void>
   selectFile: (path: string) => Promise<void>
+  clearSelectedFile: () => void
   revealFileInTree: (path: string) => void
   setDirOpen: (path: string, open: boolean) => void
   clearTreeHighlight: () => void
@@ -226,6 +227,22 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       })
       clearLastSelectedFilePath()
     }
+  },
+  clearSelectedFile: () => {
+    set({
+      selectedFilePath: null,
+      selectedFileReady: false,
+      selectedFileReadyOperator: null,
+      selectedFileReadyJobId: null,
+      selectedFileContent: "",
+      selectedPublishText: "",
+      selectedPreviewMedia: [],
+      selectedPreviewIssues: [],
+      selectedPreviewPublishable: false,
+      selectedFileLoading: false,
+      selectedFileError: null,
+    })
+    clearLastSelectedFilePath()
   },
   revealFileInTree: (path) => {
     const roots = get().roots

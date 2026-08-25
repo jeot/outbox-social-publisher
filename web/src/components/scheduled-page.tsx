@@ -8,7 +8,7 @@ import {
   setScheduledJobTime,
   type JobItem,
 } from "@/lib/jobsApi"
-import { displayCatalogPath, tooltipCatalogPath } from "@/lib/catalogPath"
+import { displayCatalogPath, fileNameFromPath } from "@/lib/catalogPath"
 import { SCHEDULE_PRESETS, type SchedulePreset } from "@/lib/schedulePresets"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
@@ -42,8 +42,10 @@ export function ScheduledPage() {
   const [customDialogJobId, setCustomDialogJobId] = useState<string | null>(null)
   const [customDateById, setCustomDateById] = useState<Record<string, string>>({})
   const [customTimeById, setCustomTimeById] = useState<Record<string, string>>({})
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null)
 
   const setActivePage = useUiStore((state) => state.setActivePage)
+  const setPreviewPanelOpen = useUiStore((state) => state.setCatalogPanelOpen)
   const roots = useCatalogStore((state) => state.roots)
   const loadCatalog = useCatalogStore((state) => state.loadCatalog)
   const revealFileInTree = useCatalogStore((state) => state.revealFileInTree)
@@ -106,6 +108,16 @@ export function ScheduledPage() {
       await selectFile(path)
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to open file in catalog")
+    }
+  }
+
+  const selectRowForPreview = async (job: JobItem) => {
+    setSelectedRowId(job.id)
+    setPreviewPanelOpen(true)
+    try {
+      await selectFile(job.file_path)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to load preview")
     }
   }
 
@@ -172,7 +184,7 @@ export function ScheduledPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>File</TableHead>
+              <TableHead className="min-w-[15rem]">File</TableHead>
               <TableHead>Platform</TableHead>
               <TableHead>{`Schedule (${localTimeZone})`}</TableHead>
               <TableHead>Actions</TableHead>
@@ -188,14 +200,19 @@ export function ScheduledPage() {
             ) : (
               sortedScheduledItems.map((job) => {
                 const running = actionKey?.endsWith(job.id)
-                const displayPath = displayCatalogPath(job.file_path, rootPaths)
-                const hoverPath = tooltipCatalogPath(job.file_path, rootPaths)
+                const fileName = fileNameFromPath(job.file_path)
 
                 return (
-                  <TableRow key={job.id}>
-                    <TableCell className="max-w-[340px] truncate" title={hoverPath}>
+                  <TableRow
+                    key={job.id}
+                    className={`cursor-pointer ${selectedRowId === job.id ? "bg-blue-100/70 ring-1 ring-inset ring-blue-300 dark:bg-blue-950/40 dark:ring-blue-700 hover:bg-blue-100/70" : "hover:bg-muted/40"}`}
+                    onClick={() => {
+                      void selectRowForPreview(job)
+                    }}
+                  >
+                    <TableCell className="min-w-[15rem] max-w-[32rem] align-top">
                       <div className="flex flex-col gap-1">
-                        <span className="truncate">{displayPath}</span>
+                        <span className="whitespace-normal break-words">{fileName}</span>
                         <Badge variant="outline">{job.id.slice(0, 8)}</Badge>
                       </div>
                     </TableCell>
@@ -216,7 +233,7 @@ export function ScheduledPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
                         <Tooltip>
                           <TooltipTrigger
                             render={

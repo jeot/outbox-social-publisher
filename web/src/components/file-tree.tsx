@@ -76,7 +76,7 @@ export function FileTree() {
   }, [highlightTick, highlightedFilePath, clearTreeHighlight, roots])
 
   return (
-    <div className="flex h-full flex-col border-l bg-card">
+    <div className="flex h-full flex-col bg-card">
       <div className="flex items-center justify-between border-b px-3 py-2">
         <h3 className="text-sm font-semibold">Catalog</h3>
         <button
@@ -215,7 +215,7 @@ function TreeNode({
             highlighted
               ? "file-reveal-flash bg-yellow-100 ring-1 ring-yellow-400 dark:bg-yellow-900/30"
               : selected
-                ? "bg-accent font-medium"
+                ? "bg-blue-100 ring-1 ring-blue-300 font-medium text-blue-900 dark:bg-blue-950/40 dark:text-blue-100 dark:ring-blue-700"
                 : "hover:bg-accent"
           }`}
         >

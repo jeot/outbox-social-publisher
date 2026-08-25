@@ -1,13 +1,14 @@
-import { useMemo } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import { AppHeader } from "@/components/app-header"
 import { AppSidebar, type AppPage } from "@/components/app-sidebar"
 import { CatalogPage } from "@/components/catalog-page"
-import { FileTree } from "@/components/file-tree"
 import { DecisionPage } from "@/components/decision-page"
+import { PreviewSidebar } from "@/components/preview-sidebar"
 import { RightSidebar } from "@/components/right-sidebar"
 import { ScheduledPage } from "@/components/scheduled-page"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
 import { Toaster } from "sonner"
 
@@ -20,9 +21,18 @@ function App() {
   const setCatalogPanelOpen = useUiStore((state) => state.setCatalogPanelOpen)
   const catalogPanelWidth = useUiStore((state) => state.catalogPanelWidth)
   const setCatalogPanelWidth = useUiStore((state) => state.setCatalogPanelWidth)
+  const clearSelectedFile = useCatalogStore((state) => state.clearSelectedFile)
+  const previousPageRef = useRef<AppPage | null>(null)
 
   const pageTitle = useMemo(() => getPageTitle(activePage), [activePage])
-  const showCatalogPanel = activePage === "catalog" && catalogPanelOpen
+
+  useEffect(() => {
+    const previous = previousPageRef.current
+    if (previous && previous !== activePage) {
+      clearSelectedFile()
+    }
+    previousPageRef.current = activePage
+  }, [activePage, clearSelectedFile])
 
   return (
     <TooltipProvider>
@@ -36,16 +46,15 @@ function App() {
         <SidebarInset className="h-svh min-h-0 overflow-hidden">
           <AppHeader
             title={pageTitle}
-            showRightPanelToggle={activePage === "catalog"}
             rightPanelOpen={catalogPanelOpen}
             onToggleRightPanel={() => setCatalogPanelOpen(!catalogPanelOpen)}
           />
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
             <MainContent activePage={activePage} />
-            {showCatalogPanel ? (
+            {catalogPanelOpen ? (
               <RightSidebar width={catalogPanelWidth} onWidthChange={setCatalogPanelWidth}>
-                <FileTree />
+                <PreviewSidebar />
               </RightSidebar>
             ) : null}
           </div>
