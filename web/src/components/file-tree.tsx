@@ -26,9 +26,21 @@ export function FileTree() {
   const clearTreeHighlight = useCatalogStore((state) => state.clearTreeHighlight)
   const fileElementRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const [openRootByPath, setOpenRootByPath] = useState<Record<string, boolean>>({})
-  const readyFilePathSet = new Set(
+  const scheduledFilePathSet = new Set(
     Object.entries(badgesByPath)
-      .filter(([, badges]) => badges.some((badge) => badge.status === "ready"))
+      .filter(([, badges]) => badges.some((badge) => badge.status === "scheduled"))
+      .map(([path]) => path)
+  )
+  const staleFilePathSet = new Set(
+    Object.entries(badgesByPath)
+      .filter(([, badges]) =>
+        badges.some(
+          (badge) =>
+            badge.status === "blocked" ||
+            badge.status === "canceled" ||
+            badge.status === "disabled"
+        )
+      )
       .map(([path]) => path)
   )
 
@@ -100,12 +112,22 @@ export function FileTree() {
                     <span className="ml-2 flex items-center gap-2">
                       {entry.ok ? (
                         (() => {
-                          const count = readyFileCountInNodeList(entry.tree, readyFilePathSet)
-                          if (count < 1) return null
+                          const scheduledCount = fileCountInNodeList(entry.tree, scheduledFilePathSet)
+                          const staleCount = fileCountInNodeList(entry.tree, staleFilePathSet)
+                          if (scheduledCount < 1 && staleCount < 1) return null
                           return (
-                            <span className="min-w-5 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-emerald-700 normal-case">
-                              {count}
-                            </span>
+                            <>
+                              {scheduledCount > 0 ? (
+                                <span className="min-w-5 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-blue-700 normal-case">
+                                  {scheduledCount}
+                                </span>
+                              ) : null}
+                              {staleCount > 0 ? (
+                                <span className="min-w-5 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-rose-700 normal-case">
+                                  {staleCount}
+                                </span>
+                              ) : null}
+                            </>
                           )
                         })()
                       ) : null}
@@ -124,7 +146,8 @@ export function FileTree() {
                             key={node.path}
                             node={node}
                             badgesByPath={badgesByPath}
-                            readyFilePathSet={readyFilePathSet}
+                            scheduledFilePathSet={scheduledFilePathSet}
+                            staleFilePathSet={staleFilePathSet}
                             selectedFilePath={selectedFilePath}
                             onSelectFile={selectFile}
                             expandedDirPaths={expandedDirPaths}
@@ -155,7 +178,8 @@ function rootLabel(fullPath: string): string {
 function TreeNode({
   node,
   badgesByPath,
-  readyFilePathSet,
+  scheduledFilePathSet,
+  staleFilePathSet,
   selectedFilePath,
   onSelectFile,
   expandedDirPaths,
@@ -165,7 +189,8 @@ function TreeNode({
 }: {
   node: CatalogNode
   badgesByPath: Record<string, CatalogJobBadge[]>
-  readyFilePathSet: Set<string>
+  scheduledFilePathSet: Set<string>
+  staleFilePathSet: Set<string>
   selectedFilePath: string | null
   onSelectFile: (path: string) => Promise<void>
   expandedDirPaths: string[]
@@ -212,7 +237,8 @@ function TreeNode({
     )
   }
 
-  const readyCount = readyFileCountInNode(node, readyFilePathSet)
+  const scheduledCount = fileCountInNode(node, scheduledFilePathSet)
+  const staleCount = fileCountInNode(node, staleFilePathSet)
   const open = expandedDirPaths.includes(node.path)
 
   return (
@@ -224,9 +250,14 @@ function TreeNode({
             <span className="min-w-0 truncate">{node.name}</span>
           </span>
           <span className="ml-2 flex items-center gap-2">
-            {readyCount > 0 ? (
-              <span className="min-w-5 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-emerald-700">
-                {readyCount}
+            {scheduledCount > 0 ? (
+              <span className="min-w-5 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-blue-700">
+                {scheduledCount}
+              </span>
+            ) : null}
+            {staleCount > 0 ? (
+              <span className="min-w-5 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-rose-700">
+                {staleCount}
               </span>
             ) : null}
             <ChevronRightIcon
@@ -241,7 +272,8 @@ function TreeNode({
               key={child.path}
               node={child}
               badgesByPath={badgesByPath}
-              readyFilePathSet={readyFilePathSet}
+              scheduledFilePathSet={scheduledFilePathSet}
+              staleFilePathSet={staleFilePathSet}
               selectedFilePath={selectedFilePath}
               onSelectFile={onSelectFile}
               expandedDirPaths={expandedDirPaths}
@@ -257,20 +289,20 @@ function TreeNode({
   )
 }
 
-function readyFileCountInNode(node: CatalogNode, readyFilePathSet: Set<string>): number {
+function fileCountInNode(node: CatalogNode, filePathSet: Set<string>): number {
   if (node.kind === "file") {
-    return readyFilePathSet.has(node.path) ? 1 : 0
+    return filePathSet.has(node.path) ? 1 : 0
   }
-  return readyFileCountInNodeList(node.children ?? [], readyFilePathSet)
+  return fileCountInNodeList(node.children ?? [], filePathSet)
 }
 
-function readyFileCountInNodeList(
+function fileCountInNodeList(
   nodes: CatalogNode[],
-  readyFilePathSet: Set<string>
+  filePathSet: Set<string>
 ): number {
   let count = 0
   for (const node of nodes) {
-    count += readyFileCountInNode(node, readyFilePathSet)
+    count += fileCountInNode(node, filePathSet)
   }
   return count
 }
@@ -324,13 +356,13 @@ function statusBadgeClassName(status: string): string {
     case "published":
       return "bg-teal-600 text-white"
     case "blocked":
-      return "bg-amber-600 text-white"
+      return "bg-rose-500/15 text-rose-700"
     case "failed":
       return "bg-red-600 text-white"
     case "canceled":
-      return "bg-slate-600 text-white"
+      return "bg-rose-500/15 text-rose-700"
     case "disabled":
-      return "bg-zinc-600 text-white"
+      return "bg-rose-500/15 text-rose-700"
     default:
       return "bg-muted text-foreground"
   }

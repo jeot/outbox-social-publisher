@@ -1193,7 +1193,7 @@ async fn schedule_multi_job(
                         file_path, run_at_utc, timezone, status_reason, attempt_count, file_sha256, text_sha256, fingerprint,
                         created_at, updated_at, deleted_at, version, synced_at, modified_by
                      ) VALUES (
-                        ?, ?, ?, ?, 'catalog', 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, 'catalog', 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, NULL, 0, ?, ?, ?,
                         ?, ?, NULL, 1, NULL, 'local'
                      )",

@@ -3,7 +3,7 @@ import { AppHeader } from "@/components/app-header"
 import { AppSidebar, type AppPage } from "@/components/app-sidebar"
 import { CatalogPage } from "@/components/catalog-page"
 import { FileTree } from "@/components/file-tree"
-import { ReadyPage } from "@/components/ready-page"
+import { DecisionPage } from "@/components/decision-page"
 import { RightSidebar } from "@/components/right-sidebar"
 import { ScheduledPage } from "@/components/scheduled-page"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
@@ -58,7 +58,7 @@ function App() {
 function MainContent({ activePage }: { activePage: AppPage }) {
   switch (activePage) {
     case "ready":
-      return <ReadyPage />
+      return <DecisionPage />
     case "scheduled":
       return <ScheduledPage />
     default:

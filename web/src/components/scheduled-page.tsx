@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { CalendarClockIcon, Link2Icon } from "lucide-react"
+import { Link2Icon } from "lucide-react"
 import { toast } from "sonner"
 
 import {
@@ -7,13 +7,14 @@ import {
   listScheduledJobs,
   setScheduledJobTime,
   type JobItem,
-  unscheduleJob,
 } from "@/lib/jobsApi"
-import { displayCatalogPath } from "@/lib/catalogPath"
+import { displayCatalogPath, tooltipCatalogPath } from "@/lib/catalogPath"
+import { SCHEDULE_PRESETS, type SchedulePreset } from "@/lib/schedulePresets"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ScheduleControls } from "@/components/schedule-controls"
 import {
   Dialog,
   DialogContent,
@@ -135,6 +136,13 @@ export function ScheduledPage() {
     setCustomDialogJobId(null)
   }
 
+  const rescheduleWithPreset = async (job: JobItem, preset: SchedulePreset) => {
+    const at = preset.at().toISOString()
+    await runAction(`reschedule:${job.id}:${preset.key}`, async () => {
+      await setScheduledJobTime(job.id, at, localTimeZone)
+    })
+  }
+
   const customDialogJob = customDialogJobId
     ? scheduledItems.find((item) => item.id === customDialogJobId) ?? null
     : null
@@ -151,7 +159,7 @@ export function ScheduledPage() {
           <div>
             <h2 className="text-xl font-semibold">Scheduled</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Review scheduled jobs and unschedule or cancel as needed.
+              Review scheduled jobs and cancel as needed.
             </p>
           </div>
           <Button variant="outline" onClick={() => void load()} disabled={loading}>
@@ -166,7 +174,7 @@ export function ScheduledPage() {
             <TableRow>
               <TableHead>File</TableHead>
               <TableHead>Platform</TableHead>
-              <TableHead>{`Run At (${localTimeZone})`}</TableHead>
+              <TableHead>{`Schedule (${localTimeZone})`}</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -181,10 +189,11 @@ export function ScheduledPage() {
               sortedScheduledItems.map((job) => {
                 const running = actionKey?.endsWith(job.id)
                 const displayPath = displayCatalogPath(job.file_path, rootPaths)
+                const hoverPath = tooltipCatalogPath(job.file_path, rootPaths)
 
                 return (
                   <TableRow key={job.id}>
-                    <TableCell className="max-w-[340px] truncate" title={job.file_path}>
+                    <TableCell className="max-w-[340px] truncate" title={hoverPath}>
                       <div className="flex flex-col gap-1">
                         <span className="truncate">{displayPath}</span>
                         <Badge variant="outline">{job.id.slice(0, 8)}</Badge>
@@ -194,17 +203,17 @@ export function ScheduledPage() {
                       <Badge variant="secondary">{job.platform ?? "none"}</Badge>
                     </TableCell>
                     <TableCell>
-                      <Button
-                        size="sm"
-                        variant="outline"
+                      <ScheduleControls
+                        presets={SCHEDULE_PRESETS}
                         disabled={Boolean(running)}
-                        onClick={() => openCustomForm(job)}
-                      >
-                        <span className="inline-flex items-center gap-2">
-                          <CalendarClockIcon className="size-4" />
-                          {formatRunAtLocal(job.run_at_utc)}
-                        </span>
-                      </Button>
+                        customLabel={formatRunAtLocal(job.run_at_utc)}
+                        showPastWarning={isPastRunAt(job.run_at_utc)}
+                        showAiIcon={job.operator === "ai"}
+                        onPresetSelect={(preset) => {
+                          void rescheduleWithPreset(job, preset)
+                        }}
+                        onCustomClick={() => openCustomForm(job)}
+                      />
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
@@ -227,21 +236,13 @@ export function ScheduledPage() {
                         </Tooltip>
                         <Button
                           size="sm"
-                          variant="outline"
-                          disabled={Boolean(running)}
-                          onClick={() =>
-                            void runAction(`unschedule:${job.id}`, async () => {
-                              await unscheduleJob(job.id)
-                            })
-                          }
-                        >
-                          Unschedule
-                        </Button>
-                        <Button
-                          size="sm"
                           variant="destructive"
                           disabled={Boolean(running)}
-                          onClick={() =>
+                          onClick={() => {
+                            const confirmed = window.confirm(
+                              "Cancel this scheduled job and move it to Decision Queue?"
+                            )
+                            if (!confirmed) return
                             void runAction(`cancel:${job.id}`, async () => {
                               await cancelJob(job.id)
                               toast.info(
@@ -249,7 +250,7 @@ export function ScheduledPage() {
                                 { duration: 30_000 }
                               )
                             })
-                          }
+                          }}
                         >
                           Cancel
                         </Button>
@@ -355,10 +356,17 @@ function formatRunAtLocal(rawUtc: string | null): string {
     hour12: true,
   }).format(date)
   const weekdayPart = new Intl.DateTimeFormat(undefined, {
-    weekday: "long",
+    weekday: "short",
   }).format(date)
 
   return `${datePart}, ${timePart} (${weekdayPart})`
+}
+
+function isPastRunAt(rawUtc: string | null): boolean {
+  if (!rawUtc) return false
+  const time = Date.parse(rawUtc)
+  if (Number.isNaN(time)) return false
+  return time < Date.now()
 }
 
 function toDateTimeLocalValue(date: Date): string {

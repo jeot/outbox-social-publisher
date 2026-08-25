@@ -8,6 +8,24 @@ export function displayCatalogPath(
   if (!matchedRoot) return absolutePath
 
   const normalizedRoot = trimTrailingSlash(matchedRoot)
+  if (absolutePath === normalizedRoot) return rootBaseName(normalizedRoot)
+
+  const prefix = `${normalizedRoot}/`
+  if (!absolutePath.startsWith(prefix)) return absolutePath
+  const relative = absolutePath.slice(prefix.length)
+  return relative.length > 0 ? relative : rootBaseName(normalizedRoot)
+}
+
+export function tooltipCatalogPath(
+  absolutePath: string,
+  catalogRoots: string[]
+): string {
+  if (!absolutePath || catalogRoots.length === 0) return absolutePath
+
+  const matchedRoot = longestMatchingRoot(absolutePath, catalogRoots)
+  if (!matchedRoot) return absolutePath
+
+  const normalizedRoot = trimTrailingSlash(matchedRoot)
   const rootName = rootBaseName(normalizedRoot)
   if (absolutePath === normalizedRoot) return rootName
 

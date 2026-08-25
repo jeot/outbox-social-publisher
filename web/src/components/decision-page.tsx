@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { CalendarClockIcon, CheckIcon, ChevronDownIcon, Link2Icon, SparklesIcon } from "lucide-react"
+import { CheckIcon, Link2Icon, SparklesIcon } from "lucide-react"
 
 import {
   listBlockedJobs,
@@ -12,7 +12,8 @@ import {
   type JobItem,
   unreadyJob,
 } from "@/lib/jobsApi"
-import { displayCatalogPath } from "@/lib/catalogPath"
+import { displayCatalogPath, tooltipCatalogPath } from "@/lib/catalogPath"
+import { SCHEDULE_PRESETS, type SchedulePreset } from "@/lib/schedulePresets"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
 import { Badge } from "@/components/ui/badge"
@@ -25,12 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { ScheduleControls } from "@/components/schedule-controls"
 import { Input } from "@/components/ui/input"
 import {
   Table,
@@ -42,37 +38,12 @@ import {
 } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
-type Preset = {
-  key: string
-  label: string
-  at: () => Date
-}
-
 type PlatformSelection = {
   linkedin: boolean
   x: boolean
 }
 
-const SCHEDULE_PRESETS: Preset[] = [
-  { key: "today_09", label: "Today 09:00", at: () => localAt(0, 9) },
-  { key: "today_12", label: "Today 12:00", at: () => localAt(0, 12) },
-  { key: "today_16", label: "Today 16:00", at: () => localAt(0, 16) },
-  { key: "today_19", label: "Today 19:00", at: () => localAt(0, 19) },
-  { key: "tomorrow_09", label: "Tomorrow 09:00", at: () => localAt(1, 9) },
-  { key: "tomorrow_12", label: "Tomorrow 12:00", at: () => localAt(1, 12) },
-  { key: "tomorrow_16", label: "Tomorrow 16:00", at: () => localAt(1, 16) },
-  { key: "tomorrow_19", label: "Tomorrow 19:00", at: () => localAt(1, 19) },
-  { key: "next_week_09", label: "Next week 09:00", at: () => localAt(7, 9) },
-  { key: "next_week_12", label: "Next week 12:00", at: () => localAt(7, 12) },
-  { key: "next_week_16", label: "Next week 16:00", at: () => localAt(7, 16) },
-  { key: "next_week_19", label: "Next week 19:00", at: () => localAt(7, 19) },
-  { key: "plus_5m", label: "+5m", at: () => plusMinutes(5) },
-  { key: "plus_30m", label: "+30m", at: () => plusMinutes(30) },
-  { key: "plus_1h", label: "+1h", at: () => plusMinutes(60) },
-  { key: "plus_3h", label: "+3h", at: () => plusMinutes(180) },
-]
-
-export function ReadyPage() {
+export function DecisionPage() {
   const [readyItems, setReadyItems] = useState<JobItem[]>([])
   const [blockedItems, setBlockedItems] = useState<JobItem[]>([])
   const [canceledItems, setCanceledItems] = useState<JobItem[]>([])
@@ -206,7 +177,7 @@ export function ReadyPage() {
     }
   }
 
-  const scheduleWithPreset = async (job: JobItem, preset: Preset) => {
+  const scheduleWithPreset = async (job: JobItem, preset: SchedulePreset) => {
     const platforms = selectedPlatforms(job.id)
     if (platforms.length === 0) {
       setError("Select at least one platform before scheduling.")
@@ -301,15 +272,14 @@ export function ReadyPage() {
               <TableRow>
                 <TableHead>File</TableHead>
                 <TableHead>Platforms</TableHead>
-                <TableHead>Quick Schedule</TableHead>
-                <TableHead>Custom Schedule</TableHead>
+                <TableHead>Schedule</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {decisionItems.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-sm text-muted-foreground">
+                  <TableCell colSpan={4} className="text-sm text-muted-foreground">
                     {loading ? "Loading decision queue..." : "No items in decision queue."}
                   </TableCell>
                 </TableRow>
@@ -329,10 +299,11 @@ export function ReadyPage() {
                     }
                     const selection = platformById[job.id] ?? fallbackSelection
                     const displayPath = displayCatalogPath(job.file_path, rootPaths)
+                    const hoverPath = tooltipCatalogPath(job.file_path, rootPaths)
 
                     return (
                       <TableRow key={job.id}>
-                        <TableCell className="max-w-[340px] truncate" title={job.file_path}>
+                        <TableCell className="max-w-[340px] truncate" title={hoverPath}>
                           <div className="flex flex-col gap-1">
                             <span className="truncate">{displayPath}</span>
                             <div className="flex gap-2">
@@ -395,50 +366,17 @@ export function ReadyPage() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger
-                              render={
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={Boolean(running) || savingPlatforms}
-                                />
-                              }
-                            >
-                              <span className="inline-flex items-center gap-2">
-                                Schedule
-                                <ChevronDownIcon className="size-4" />
-                              </span>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="start" sideOffset={6}>
-                              {SCHEDULE_PRESETS.map((preset) => (
-                                <DropdownMenuItem
-                                  key={preset.key}
-                                  onClick={() => {
-                                    void scheduleWithPreset(job, preset)
-                                  }}
-                                >
-                                  {preset.label}
-                                </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </TableCell>
-                        <TableCell>
-                          <Button
-                            size="sm"
-                            variant="outline"
+                          <ScheduleControls
+                            presets={SCHEDULE_PRESETS}
                             disabled={Boolean(running) || savingPlatforms}
-                            onClick={() => openCustomForm(job.id)}
-                          >
-                            <span className="inline-flex items-center gap-2">
-                              <CalendarClockIcon className="size-4" />
-                              {readyScheduleLabel(job)}
-                              {job.operator === "ai" ? (
-                                <SparklesIcon className="size-4 text-emerald-500" />
-                              ) : null}
-                            </span>
-                          </Button>
+                            customLabel={readyScheduleLabel(job)}
+                            showPastWarning={isPastRunAt(job.run_at_utc)}
+                            showAiIcon={job.operator === "ai"}
+                            onPresetSelect={(preset) => {
+                              void scheduleWithPreset(job, preset)
+                            }}
+                            onCustomClick={() => openCustomForm(job.id)}
+                          />
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
@@ -564,19 +502,6 @@ export function ReadyPage() {
   )
 }
 
-function localAt(dayOffset: number, hour: number): Date {
-  const next = new Date()
-  next.setDate(next.getDate() + dayOffset)
-  next.setHours(hour, 0, 0, 0)
-  return next
-}
-
-function plusMinutes(minutes: number): Date {
-  const next = new Date()
-  next.setMinutes(next.getMinutes() + minutes)
-  return next
-}
-
 function selectedPlatformsFromSelection(
   selection: PlatformSelection
 ): Array<"linkedin" | "x"> {
@@ -645,9 +570,16 @@ function formatRunAtLocal(rawUtc: string): string {
     hour12: true,
   }).format(date)
   const weekdayPart = new Intl.DateTimeFormat(undefined, {
-    weekday: "long",
+    weekday: "short",
   }).format(date)
   return `${datePart}, ${timePart} (${weekdayPart})`
+}
+
+function isPastRunAt(rawUtc: string | null): boolean {
+  if (!rawUtc) return false
+  const time = Date.parse(rawUtc)
+  if (Number.isNaN(time)) return false
+  return time < Date.now()
 }
 
 async function checkReadyFileHasIssue(filePath: string): Promise<boolean> {
