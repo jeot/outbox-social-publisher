@@ -1,2 +1,0 @@
--- SQLite does not support DROP COLUMN in older compatibility modes used here.
--- No-op rollback for selected_platforms addition.

@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::errors::AppError;
 
 const DEFAULT_HOME_DIR_NAME: &str = ".publo.so";
 const DEFAULT_WORKSPACE_ID: &str = "default";
@@ -40,6 +43,7 @@ struct SecurityConfigFile {
 
 #[derive(Debug, Deserialize)]
 struct WorkspaceMetaConfig {
+    id: Option<String>,
     display_name: Option<String>,
 }
 
@@ -107,7 +111,7 @@ pub(crate) struct SignatureLayer {
 pub(crate) struct RuntimePaths {
     pub(crate) publo_home: PathBuf,
     pub(crate) global_config_path: PathBuf,
-    pub(crate) workspace_id: String,
+    pub(crate) workspace_key: String,
     pub(crate) workspace_dir: PathBuf,
     pub(crate) workspace_config_path: PathBuf,
     pub(crate) env_path: PathBuf,
@@ -120,6 +124,7 @@ pub(crate) struct RuntimePaths {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeConfig {
+    pub(crate) workspace_id: String,
     pub(crate) pretty_json: bool,
     pub(crate) connect_timeout: Duration,
     pub(crate) request_timeout: Duration,
@@ -136,9 +141,10 @@ pub(crate) struct RuntimeConfig {
     pub(crate) paths: RuntimePaths,
 }
 
-pub(crate) fn load_config() -> RuntimeConfig {
+pub(crate) fn load_config() -> Result<RuntimeConfig, AppError> {
     let paths = resolve_runtime_paths();
     let defaults = RuntimeConfig {
+        workspace_id: String::new(),
         pretty_json: false,
         connect_timeout: Duration::from_secs(10),
         request_timeout: Duration::from_secs(30),
@@ -160,7 +166,7 @@ pub(crate) fn load_config() -> RuntimeConfig {
         api_port: 8787,
         catalog_roots: Vec::new(),
         publish_cli_password: "shk".to_string(),
-        workspace_display_name: default_workspace_display_name(&paths.workspace_id),
+        workspace_display_name: default_workspace_display_name(&paths.workspace_key),
         paths: paths.clone(),
     };
 
@@ -271,13 +277,38 @@ pub(crate) fn load_config() -> RuntimeConfig {
         })
         .unwrap_or_else(Vec::new);
 
+    let workspace_id = workspace_config
+        .as_ref()
+        .and_then(|cfg| cfg.workspace.as_ref())
+        .and_then(|workspace| workspace.id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Validation {
+            message: format!(
+                "Workspace config is missing [workspace].id: {}",
+                paths.workspace_config_path.display()
+            ),
+            suggestion: Some("Run `publo init` to initialize this workspace identity.".to_string()),
+            command: Some("publo init".to_string()),
+        })?;
+    let workspace_id = Uuid::parse_str(workspace_id)
+        .map_err(|_| AppError::Validation {
+            message: format!(
+                "Workspace config [workspace].id must be a UUID v4: {}",
+                paths.workspace_config_path.display()
+            ),
+            suggestion: Some("Run `publo init` to initialize this workspace identity.".to_string()),
+            command: Some("publo init".to_string()),
+        })?
+        .to_string();
+
     let workspace_display_name = workspace_config
         .as_ref()
         .and_then(|cfg| cfg.workspace.as_ref())
         .and_then(|w| w.display_name.as_ref())
         .cloned()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| default_workspace_display_name(&paths.workspace_id));
+        .unwrap_or_else(|| default_workspace_display_name(&paths.workspace_key));
 
     let publish_cli_password = workspace_config
         .as_ref()
@@ -293,7 +324,8 @@ pub(crate) fn load_config() -> RuntimeConfig {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| defaults.publish_cli_password.clone());
 
-    RuntimeConfig {
+    Ok(RuntimeConfig {
+        workspace_id,
         pretty_json,
         connect_timeout,
         request_timeout,
@@ -308,23 +340,23 @@ pub(crate) fn load_config() -> RuntimeConfig {
         publish_cli_password,
         workspace_display_name,
         paths,
-    }
+    })
 }
 
 pub(crate) fn resolve_runtime_paths() -> RuntimePaths {
     let publo_home = resolve_publo_home();
     let global_config_path = resolve_global_config_path(&publo_home);
-    let workspace_id = resolve_workspace_id(&global_config_path);
-    resolve_runtime_paths_for_workspace_id(publo_home, global_config_path, workspace_id)
+    let workspace_key = resolve_workspace_key(&global_config_path);
+    resolve_runtime_paths_for_workspace_key(publo_home, global_config_path, workspace_key)
 }
 
-pub(crate) fn resolve_runtime_paths_for_workspace(workspace_id: &str) -> RuntimePaths {
+pub(crate) fn resolve_runtime_paths_for_workspace(workspace_key: &str) -> RuntimePaths {
     let publo_home = resolve_publo_home();
     let global_config_path = resolve_global_config_path(&publo_home);
-    resolve_runtime_paths_for_workspace_id(
+    resolve_runtime_paths_for_workspace_key(
         publo_home,
         global_config_path,
-        normalize_workspace_id(workspace_id),
+        normalize_workspace_key(workspace_key),
     )
 }
 
@@ -338,12 +370,12 @@ pub(crate) fn resolve_publo_home() -> PathBuf {
     home_dir().join(DEFAULT_HOME_DIR_NAME)
 }
 
-fn resolve_runtime_paths_for_workspace_id(
+fn resolve_runtime_paths_for_workspace_key(
     publo_home: PathBuf,
     global_config_path: PathBuf,
-    workspace_id: String,
+    workspace_key: String,
 ) -> RuntimePaths {
-    let workspace_dir = publo_home.join("workspaces").join(&workspace_id);
+    let workspace_dir = publo_home.join("workspaces").join(&workspace_key);
     let workspace_config_path = workspace_dir.join(WORKSPACE_CONFIG_FILE_NAME);
     let env_path = env::var("PUBLO_ENV")
         .ok()
@@ -358,7 +390,7 @@ fn resolve_runtime_paths_for_workspace_id(
     RuntimePaths {
         publo_home,
         global_config_path,
-        workspace_id,
+        workspace_key,
         workspace_dir,
         workspace_config_path,
         env_path,
@@ -380,21 +412,21 @@ fn resolve_global_config_path(publo_home: &Path) -> PathBuf {
     publo_home.join(GLOBAL_CONFIG_FILE_NAME)
 }
 
-fn resolve_workspace_id(global_config_path: &Path) -> String {
+fn resolve_workspace_key(global_config_path: &Path) -> String {
     if let Ok(raw) = env::var("PUBLO_WORKSPACE") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            return normalize_workspace_id(trimmed);
+            return normalize_workspace_key(trimmed);
         }
     }
 
     load_global_config(global_config_path)
         .and_then(|cfg| cfg.workspace.and_then(|w| w.default))
-        .map(|w| normalize_workspace_id(&w))
+        .map(|w| normalize_workspace_key(&w))
         .unwrap_or_else(|| DEFAULT_WORKSPACE_ID.to_string())
 }
 
-pub(crate) fn normalize_workspace_id(input: &str) -> String {
+pub(crate) fn normalize_workspace_key(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return DEFAULT_WORKSPACE_ID.to_string();

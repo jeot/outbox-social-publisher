@@ -645,15 +645,16 @@ async fn ready_mark(
 
     let insert_result = sql_query(
         "INSERT INTO jobs (
-            id, action_group_id, content_group_id, asset_id, kind, status, file_path, file_sha256, text_sha256, created_at, updated_at
+            id, action_group_id, content_group_id, asset_id, kind, status, workspace_id, file_path, file_sha256, text_sha256, created_at, updated_at
          ) VALUES (
-            ?, ?, ?, ?, 'catalog', 'ready', ?, ?, ?, ?, ?
+            ?, ?, ?, ?, 'catalog', 'ready', ?, ?, ?, ?, ?, ?
          )",
     )
     .bind::<Text, _>(&id)
     .bind::<Text, _>(&action_group_id)
     .bind::<Text, _>(&content_group_id)
     .bind::<Text, _>(&asset_id)
+    .bind::<Text, _>(&state.runtime_config.workspace_id)
     .bind::<Text, _>(&canonical_str)
     .bind::<Text, _>(&file_sha256)
     .bind::<Text, _>(&text_sha256)

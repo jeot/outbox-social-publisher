@@ -44,6 +44,8 @@ const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read media.write of
 use auth::{env_non_empty, load_linkedin_auth, load_x_auth};
 use cli::*;
 use config::{RuntimeConfig, load_config};
+#[cfg(test)]
+use config::{RuntimePaths, SignatureLayer};
 use db::{ensure_db_ready, open_db};
 use errors::AppError;
 use util::json::print_json;
@@ -286,7 +288,13 @@ pub async fn run() -> ExitCode {
         }
     }
 
-    let config = load_config();
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(err) => {
+            print_json(&err.to_output(), true);
+            return ExitCode::from(err.exit_code());
+        }
+    };
     let _ = dotenvy::from_filename_override(&config.paths.env_path);
     let requires_writable_db = matches!(&cli.command, Commands::Job(_) | Commands::Serve(_));
     if requires_writable_db {
@@ -400,7 +408,7 @@ fn validate_serve_requirements(config: &RuntimeConfig) -> Result<(), AppError> {
         return Err(AppError::Validation {
             message: format!(
                 "Workspace config not found for workspace '{}': {}",
-                config.paths.workspace_id,
+                config.paths.workspace_key,
                 config.paths.workspace_config_path.display()
             ),
             suggestion: Some("Run `publo init` to create required files.".to_string()),
@@ -451,7 +459,8 @@ fn show_paths(config: &RuntimeConfig) -> Result<Value, AppError> {
         "publo_home": config.paths.publo_home.display().to_string(),
         "global_config_path": config.paths.global_config_path.display().to_string(),
         "global_config_exists": config.paths.global_config_path.exists(),
-        "workspace_id": config.paths.workspace_id,
+        "workspace_key": config.paths.workspace_key,
+        "workspace_id": config.workspace_id,
         "workspace_display_name": config.workspace_display_name,
         "workspace_config_path": config.paths.workspace_config_path.display().to_string(),
         "workspace_config_exists": config.paths.workspace_config_path.exists(),
@@ -467,8 +476,8 @@ fn show_paths(config: &RuntimeConfig) -> Result<Value, AppError> {
 }
 
 fn run_init(args: InitArgs) -> Result<Value, AppError> {
-    let default_workspace_id = config::resolve_runtime_paths().workspace_id;
-    let default_display_name = config::default_workspace_display_name(&default_workspace_id);
+    let default_workspace_key = config::resolve_runtime_paths().workspace_key;
+    let default_display_name = config::default_workspace_display_name(&default_workspace_key);
 
     let selected_display_name = if let Some(value) = args.display_name {
         let trimmed = value.trim().to_string();
@@ -481,27 +490,33 @@ fn run_init(args: InitArgs) -> Result<Value, AppError> {
         prompt_workspace_display_name(&default_display_name)?
     };
 
-    let selected_workspace_id = if let Some(value) = args.workspace_id {
-        config::normalize_workspace_id(&value)
+    let selected_workspace_key = if let Some(value) = args.workspace_id {
+        config::normalize_workspace_key(&value)
     } else {
-        config::normalize_workspace_id(&selected_display_name)
+        config::normalize_workspace_key(&selected_display_name)
     };
 
-    let paths = config::resolve_runtime_paths_for_workspace(&selected_workspace_id);
+    let paths = config::resolve_runtime_paths_for_workspace(&selected_workspace_key);
+    let workspace_id = generate_id();
     let mut steps: Vec<Value> = Vec::new();
 
     ensure_dir_step(&paths.publo_home, "publo_home", &mut steps)?;
     ensure_file_step(
         &paths.global_config_path,
-        &global_config_template(&paths.workspace_id),
+        &global_config_template(&paths.workspace_key),
         "global_config",
         &mut steps,
     )?;
     ensure_dir_step(&paths.workspace_dir, "workspace_dir", &mut steps)?;
     ensure_file_step(
         &paths.workspace_config_path,
-        &workspace_config_template(&selected_display_name),
+        &workspace_config_template(&workspace_id, &selected_display_name),
         "workspace_config",
+        &mut steps,
+    )?;
+    let workspace_id = ensure_workspace_config_identity(
+        &paths.workspace_config_path,
+        &workspace_id,
         &mut steps,
     )?;
     ensure_file_step(
@@ -521,7 +536,8 @@ fn run_init(args: InitArgs) -> Result<Value, AppError> {
     Ok(json!({
         "ok": true,
         "mode": "init",
-        "workspace_id": paths.workspace_id,
+        "workspace_key": paths.workspace_key,
+        "workspace_id": workspace_id,
         "workspace_display_name": selected_display_name,
         "publo_home": paths.publo_home.display().to_string(),
         "global_config_path": paths.global_config_path.display().to_string(),
@@ -534,14 +550,14 @@ fn run_init(args: InitArgs) -> Result<Value, AppError> {
 }
 
 fn workspace_switch(args: WorkspaceSwitchArgs) -> Result<Value, AppError> {
-    let workspace_id = config::normalize_workspace_id(&args.workspace_id);
-    let paths = config::resolve_runtime_paths_for_workspace(&workspace_id);
+    let workspace_key = config::normalize_workspace_key(&args.workspace_id);
+    let paths = config::resolve_runtime_paths_for_workspace(&workspace_key);
 
     if !paths.workspace_config_path.exists() {
         return Err(AppError::Validation {
             message: format!(
                 "Workspace '{}' does not exist. Expected config at {}",
-                workspace_id,
+                workspace_key,
                 paths.workspace_config_path.display()
             ),
             suggestion: Some(
@@ -572,7 +588,7 @@ fn workspace_switch(args: WorkspaceSwitchArgs) -> Result<Value, AppError> {
             global_config_path.display()
         ),
     })?;
-    let updated = set_default_workspace_in_global_config(&current_raw, &workspace_id);
+    let updated = set_default_workspace_in_global_config(&current_raw, &workspace_key);
     fs::write(&global_config_path, updated).map_err(|err| AppError::Io {
         message: format!(
             "Failed to update global config '{}': {err}",
@@ -583,7 +599,7 @@ fn workspace_switch(args: WorkspaceSwitchArgs) -> Result<Value, AppError> {
     Ok(json!({
         "ok": true,
         "mode": "workspace_switch",
-        "workspace_id": workspace_id,
+        "workspace_key": workspace_key,
         "global_config_path": global_config_path.display().to_string(),
         "note": "Default workspace updated."
     }))
@@ -660,6 +676,47 @@ fn ensure_file_step(path: &PathBuf, content: &str, key: &str, steps: &mut Vec<Va
     Ok(())
 }
 
+fn ensure_workspace_config_identity(
+    path: &PathBuf,
+    generated_id: &str,
+    steps: &mut Vec<Value>,
+) -> Result<String, AppError> {
+    let raw = fs::read_to_string(path).map_err(|err| AppError::Io {
+        message: format!("Failed to read workspace config '{}': {err}", path.display()),
+    })?;
+    if let Some(existing) = raw.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "id").then(|| value.trim().trim_matches('"').to_string())
+    }) {
+        Uuid::parse_str(&existing).map_err(|_| AppError::Validation {
+            message: format!("Workspace config has invalid [workspace].id: {}", path.display()),
+            suggestion: Some("Set [workspace].id to a UUID v4.".to_string()),
+            command: None,
+        })?;
+        return Ok(existing);
+    }
+
+    let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+    let workspace_index = lines.iter().position(|line| line.trim() == "[workspace]").ok_or_else(|| {
+        AppError::Validation {
+            message: format!("Workspace config has no [workspace] section: {}", path.display()),
+            suggestion: Some("Add a [workspace] section and run `publo init` again.".to_string()),
+            command: None,
+        }
+    })?;
+    lines.insert(workspace_index + 1, format!("id = \"{generated_id}\""));
+    fs::write(path, format!("{}\n", lines.join("\n"))).map_err(|err| AppError::Io {
+        message: format!("Failed to write workspace config '{}': {err}", path.display()),
+    })?;
+    steps.push(json!({
+        "key": "workspace_identity",
+        "path": path.display().to_string(),
+        "status": "created",
+        "touched": true
+    }));
+    Ok(generated_id.to_string())
+}
+
 fn global_config_template(default_workspace_id: &str) -> String {
     let base = include_str!("../.publo.so.example/config.toml").to_string();
     if default_workspace_id == "default" {
@@ -671,9 +728,12 @@ fn global_config_template(default_workspace_id: &str) -> String {
     )
 }
 
-fn workspace_config_template(display_name: &str) -> String {
+fn workspace_config_template(workspace_id: &str, display_name: &str) -> String {
     let base = include_str!("../.publo.so.example/workspaces/default/config.toml").to_string();
     base.replace(
+        "[workspace]\n",
+        &format!("[workspace]\nid = \"{workspace_id}\"\n"),
+    ).replace(
         "display_name = \"Default\"",
         &format!("display_name = \"{}\"", display_name.replace('"', "\\\"")),
     )
@@ -879,10 +939,7 @@ fn job_ready(args: JobReadyArgs, config: &RuntimeConfig) -> Result<Value, AppErr
         Some(value) => Some(parse_run_at_to_utc(value)?),
         None => None,
     };
-    let workspace_id = args
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| config.paths.workspace_id.clone());
+    let workspace_id = config.workspace_id.clone();
 
     let mut conn = open_db(config)?;
     let now = now_rfc3339_utc();
@@ -1202,10 +1259,7 @@ pub(crate) fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig)
     let run_at_utc = parse_run_at_to_utc(&args.at)?;
     let file_path = fs::canonicalize(&args.file).unwrap_or(args.file.clone());
     let platform = args.platform.as_str();
-    let workspace_id = args
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| config.paths.workspace_id.clone());
+    let workspace_id = config.workspace_id.clone();
     let selected_platforms_json = selected_platforms_json(&[args.platform]);
 
     let preflight_input = JobRow {
@@ -1544,12 +1598,10 @@ fn worker_run_dry_once(args: WorkerRunArgs, config: &RuntimeConfig) -> Result<Va
          WHERE status = 'scheduled'
            AND run_at_utc IS NOT NULL
            AND run_at_utc <= ?
-           AND workspace_id = ?
            AND deleted_at IS NULL
          ORDER BY run_at_utc ASC, created_at ASC",
     )
     .bind::<Text, _>(&now)
-    .bind::<Text, _>(&config.paths.workspace_id)
     .load(&mut conn)
     .map_err(|err| AppError::Io {
         message: format!("Failed to list due scheduled jobs: {err}"),
@@ -1592,12 +1644,216 @@ fn worker_run_dry_once(args: WorkerRunArgs, config: &RuntimeConfig) -> Result<Va
         "live": false,
         "db_changed": false,
         "now_utc": now,
-        "workspace_id": config.paths.workspace_id,
+        "workspace_id": config.workspace_id,
         "due_count": items.len(),
         "publishable_count": publishable_count,
         "blocked_count": blocked_count,
         "items": items
     }))
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Wired to the live worker in the next implementation step.
+struct WorkerPublishReceipt {
+    post_id: Option<String>,
+    post_url: Option<String>,
+    request_id: Option<String>,
+    response: Value,
+}
+
+/// The live worker will implement this with the real platform publishers. Tests use a local fake.
+#[allow(dead_code)] // Exercised by worker tests until the live worker is connected.
+trait WorkerPublisher {
+    fn preflight(&self, job: &JobRow) -> Result<JobPreflightResult, AppError>;
+    fn publish(
+        &self,
+        job: &JobRow,
+        preflight: &JobPreflightResult,
+    ) -> Result<WorkerPublishReceipt, AppError>;
+}
+
+#[allow(dead_code)] // Reused by the live worker after its safe test phase.
+fn claim_due_job(
+    conn: &mut SqliteConnection,
+    job_id: &str,
+    now: &str,
+) -> Result<Option<JobRow>, AppError> {
+    conn.immediate_transaction::<Option<JobRow>, diesel::result::Error, _>(|conn| {
+        let changed = sql_query(
+            "UPDATE jobs
+             SET status = 'publishing',
+                 attempt_count = attempt_count + 1,
+                 updated_at = ?,
+                 version = version + 1,
+                 synced_at = NULL,
+                 modified_by = 'local'
+             WHERE id = ?
+               AND status = 'scheduled'
+               AND run_at_utc IS NOT NULL
+               AND run_at_utc <= ?
+               AND deleted_at IS NULL",
+        )
+        .bind::<Text, _>(now)
+        .bind::<Text, _>(job_id)
+        .bind::<Text, _>(now)
+        .execute(conn)?;
+
+        if changed == 0 {
+            return Ok(None);
+        }
+
+        let job = sql_query(
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+             FROM jobs WHERE id = ? LIMIT 1",
+        )
+        .bind::<Text, _>(job_id)
+        .get_result::<JobRow>(conn)?;
+
+        sql_query(
+            "INSERT INTO publish_attempts (
+                id, job_id, attempt_no, platform, workspace_id, owner_user_id, trigger_mode,
+                started_at, success, created_at, updated_at, modified_by
+             ) VALUES (?, ?, ?, ?, ?, ?, 'worker', ?, 0, ?, ?, 'local')",
+        )
+        .bind::<Text, _>(generate_id())
+        .bind::<Text, _>(&job.id)
+        .bind::<Integer, _>(job.attempt_count)
+        .bind::<Text, _>(job.platform.as_deref().unwrap_or_default())
+        .bind::<Text, _>(&job.workspace_id)
+        .bind::<Nullable<Text>, _>(job.owner_user_id.as_deref())
+        .bind::<Text, _>(now)
+        .bind::<Text, _>(now)
+        .bind::<Text, _>(now)
+        .execute(conn)?;
+
+        Ok(Some(job))
+    })
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to claim due job {job_id}: {err}"),
+    })
+}
+
+#[allow(dead_code)] // Reused by the live worker after its safe test phase.
+fn finish_worker_job_success(
+    conn: &mut SqliteConnection,
+    job: &JobRow,
+    preflight: &JobPreflightResult,
+    receipt: &WorkerPublishReceipt,
+    now: &str,
+) -> Result<(), AppError> {
+    let response_json = serde_json::to_string(&receipt.response).map_err(|err| AppError::Io {
+        message: format!("Failed to serialize worker publish response: {err}"),
+    })?;
+    sql_query(
+        "UPDATE publish_attempts
+         SET finished_at = ?, success = 1, response_json = ?, post_id = ?, post_url = ?, request_id = ?,
+             file_sha256 = ?, text_sha256 = ?, fingerprint = ?, updated_at = ?, version = version + 1
+         WHERE job_id = ? AND attempt_no = ? AND trigger_mode = 'worker'",
+    )
+    .bind::<Text, _>(now)
+    .bind::<Text, _>(&response_json)
+    .bind::<Nullable<Text>, _>(receipt.post_id.as_deref())
+    .bind::<Nullable<Text>, _>(receipt.post_url.as_deref())
+    .bind::<Nullable<Text>, _>(receipt.request_id.as_deref())
+    .bind::<Text, _>(&preflight.file_sha256)
+    .bind::<Text, _>(&preflight.text_sha256)
+    .bind::<Text, _>(&preflight.fingerprint)
+    .bind::<Text, _>(now)
+    .bind::<Text, _>(&job.id)
+    .bind::<Integer, _>(job.attempt_count)
+    .execute(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to finish successful publish attempt: {err}"),
+    })?;
+
+    sql_query(
+        "UPDATE jobs
+         SET status = 'published', status_reason = NULL, file_sha256 = ?, text_sha256 = ?, fingerprint = ?,
+             last_error_type = NULL, last_error_message = NULL, last_http_status = NULL,
+             updated_at = ?, version = version + 1, synced_at = NULL, modified_by = 'local'
+         WHERE id = ? AND status = 'publishing'",
+    )
+    .bind::<Text, _>(&preflight.file_sha256)
+    .bind::<Text, _>(&preflight.text_sha256)
+    .bind::<Text, _>(&preflight.fingerprint)
+    .bind::<Text, _>(now)
+    .bind::<Text, _>(&job.id)
+    .execute(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to mark worker job published: {err}"),
+    })?;
+    Ok(())
+}
+
+#[allow(dead_code)] // Reused by the live worker after its safe test phase.
+fn finish_worker_job_error(
+    conn: &mut SqliteConnection,
+    job: &JobRow,
+    status: &str,
+    error: &AppError,
+    now: &str,
+) -> Result<(), AppError> {
+    let output = error.to_output();
+    let response_json = serde_json::to_string(&output).map_err(|err| AppError::Io {
+        message: format!("Failed to serialize worker error response: {err}"),
+    })?;
+    sql_query(
+        "UPDATE publish_attempts
+         SET finished_at = ?, success = 0, error_type = ?, error_message = ?, http_status = ?, response_json = ?,
+             updated_at = ?, version = version + 1
+         WHERE job_id = ? AND attempt_no = ? AND trigger_mode = 'worker'",
+    )
+    .bind::<Text, _>(now)
+    .bind::<Text, _>(output.error_type)
+    .bind::<Text, _>(&output.message)
+    .bind::<Nullable<Integer>, _>(output.http_status.map(i32::from))
+    .bind::<Text, _>(&response_json)
+    .bind::<Text, _>(now)
+    .bind::<Text, _>(&job.id)
+    .bind::<Integer, _>(job.attempt_count)
+    .execute(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to finish failed publish attempt: {err}"),
+    })?;
+
+    sql_query(
+        "UPDATE jobs
+         SET status = ?, status_reason = ?, last_error_type = ?, last_error_message = ?, last_http_status = ?,
+             updated_at = ?, version = version + 1, synced_at = NULL, modified_by = 'local'
+         WHERE id = ? AND status = 'publishing'",
+    )
+    .bind::<Text, _>(status)
+    .bind::<Text, _>(&output.message)
+    .bind::<Text, _>(output.error_type)
+    .bind::<Text, _>(&output.message)
+    .bind::<Nullable<Integer>, _>(output.http_status.map(i32::from))
+    .bind::<Text, _>(now)
+    .bind::<Text, _>(&job.id)
+    .execute(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to finalize worker job error: {err}"),
+    })?;
+    Ok(())
+}
+
+#[allow(dead_code)] // Reused by the live worker after its safe test phase.
+fn execute_claimed_job(
+    conn: &mut SqliteConnection,
+    job: &JobRow,
+    publisher: &dyn WorkerPublisher,
+    now: &str,
+) -> Result<(), AppError> {
+    let preflight = match publisher.preflight(job) {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            finish_worker_job_error(conn, job, "blocked", &error, now)?;
+            return Ok(());
+        }
+    };
+    match publisher.publish(job, &preflight) {
+        Ok(receipt) => finish_worker_job_success(conn, job, &preflight, &receipt, now),
+        Err(error) => finish_worker_job_error(conn, job, "failed", &error, now),
+    }
 }
 
 fn get_job_by_id(conn: &mut SqliteConnection, id: &str) -> Result<JobRow, AppError> {
@@ -4209,4 +4465,286 @@ fn format_env_value(value: &str) -> String {
         .replace('\r', "\\r")
         .replace('\t', "\\t");
     format!("\"{escaped}\"")
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    struct TestWorkspace {
+        root: PathBuf,
+        config: RuntimeConfig,
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn test_workspace() -> TestWorkspace {
+        let root = env::temp_dir().join(format!("publo-worker-test-{}", generate_id()));
+        let workspace_dir = root.join("workspace");
+        let runtime_dir = workspace_dir.join("runtime");
+        fs::create_dir_all(&runtime_dir).expect("create test workspace");
+        let db_path = workspace_dir.join("publo.db");
+        let paths = RuntimePaths {
+            publo_home: root.clone(),
+            global_config_path: root.join("config.toml"),
+            workspace_key: "worker-test".to_string(),
+            workspace_dir: workspace_dir.clone(),
+            workspace_config_path: workspace_dir.join("config.toml"),
+            env_path: workspace_dir.join(".env"),
+            runtime_dir: runtime_dir.clone(),
+            db_default_path: db_path.clone(),
+            publish_log_path: workspace_dir.join("publish-log.jsonl"),
+            linkedin_oauth_state_path: runtime_dir.join("linkedin_oauth_state.json"),
+            x_oauth_state_path: runtime_dir.join("x_oauth_state.json"),
+        };
+        let config = RuntimeConfig {
+            workspace_id: generate_id(),
+            pretty_json: false,
+            connect_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(1),
+            global_signature: SignatureLayer { enabled: None, text: None },
+            linkedin_signature: SignatureLayer { enabled: None, text: None },
+            x_signature: SignatureLayer { enabled: None, text: None },
+            media_lookup_paths: Vec::new(),
+            db_path,
+            api_host: "127.0.0.1".to_string(),
+            api_port: 0,
+            catalog_roots: vec![workspace_dir.clone()],
+            publish_cli_password: "test-password".to_string(),
+            workspace_display_name: "Worker Test".to_string(),
+            paths,
+        };
+        ensure_db_ready(&config).expect("migrate test database");
+        TestWorkspace { root, config }
+    }
+
+    fn insert_due_job(workspace: &TestWorkspace, file_path: &PathBuf) -> String {
+        let id = generate_id();
+        let mut conn = open_db(&workspace.config).expect("open test database");
+        sql_query(
+            "INSERT INTO jobs (
+                id, action_group_id, content_group_id, asset_id, kind, status, platform, workspace_id,
+                selected_platforms, file_path, run_at_utc, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, 'catalog', 'scheduled', 'linkedin', ?, '[\"linkedin\"]', ?, '2020-01-01T00:00:00+00:00', ?, ?)",
+        )
+        .bind::<Text, _>(&id)
+        .bind::<Text, _>(generate_id())
+        .bind::<Text, _>(generate_id())
+        .bind::<Text, _>(generate_id())
+        .bind::<Text, _>(&workspace.config.workspace_id)
+        .bind::<Text, _>(file_path.display().to_string())
+        .bind::<Text, _>(now_rfc3339_utc())
+        .bind::<Text, _>(now_rfc3339_utc())
+        .execute(&mut conn)
+        .expect("insert due job");
+        id
+    }
+
+    fn write_post(workspace: &TestWorkspace, name: &str) -> PathBuf {
+        let path = workspace.config.paths.workspace_dir.join(name);
+        fs::write(&path, "# Test post\n\nA local worker test post.").expect("write post");
+        path
+    }
+
+    fn attempt_rows(conn: &mut SqliteConnection, job_id: &str) -> Vec<TestAttemptRow> {
+        sql_query(
+            "SELECT success, error_type, post_id
+             FROM publish_attempts WHERE job_id = ? ORDER BY attempt_no ASC",
+        )
+        .bind::<Text, _>(job_id)
+        .load(conn)
+        .expect("read attempts")
+    }
+
+    #[derive(Debug, QueryableByName)]
+    struct TestAttemptRow {
+        #[diesel(sql_type = Integer)]
+        success: i32,
+        #[diesel(sql_type = Nullable<Text>)]
+        error_type: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        post_id: Option<String>,
+    }
+
+    enum FakePublishOutcome {
+        Success,
+        Failure,
+    }
+
+    struct FakeWorkerPublisher {
+        outcome: FakePublishOutcome,
+    }
+
+    impl WorkerPublisher for FakeWorkerPublisher {
+        fn preflight(&self, job: &JobRow) -> Result<JobPreflightResult, AppError> {
+            let raw = fs::read_to_string(&job.file_path).map_err(|err| AppError::Io {
+                message: format!("Fake worker could not read {}: {err}", job.file_path),
+            })?;
+            Ok(JobPreflightResult {
+                file_sha256: compute_content_sha256(raw.as_bytes()),
+                text_sha256: compute_content_sha256(raw.as_bytes()),
+                fingerprint: format!("fake:{}", job.id),
+                details: json!({ "fake": true }),
+            })
+        }
+
+        fn publish(
+            &self,
+            _job: &JobRow,
+            _preflight: &JobPreflightResult,
+        ) -> Result<WorkerPublishReceipt, AppError> {
+            match self.outcome {
+                FakePublishOutcome::Success => Ok(WorkerPublishReceipt {
+                    post_id: Some("fake-post-1".to_string()),
+                    post_url: Some("https://example.test/posts/fake-post-1".to_string()),
+                    request_id: Some("fake-request-1".to_string()),
+                    response: json!({ "fake": true, "published": true }),
+                }),
+                FakePublishOutcome::Failure => Err(AppError::Http {
+                    message: "Fake provider temporary failure.".to_string(),
+                    status: Some(503),
+                    api_error: None,
+                    retryable: true,
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn worker_claim_and_fake_publish_records_success() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "success.md");
+        let job_id = insert_due_job(&workspace, &file);
+        let now = now_rfc3339_utc();
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let job = claim_due_job(&mut conn, &job_id, &now)
+            .expect("claim job")
+            .expect("job is claimed");
+
+        execute_claimed_job(
+            &mut conn,
+            &job,
+            &FakeWorkerPublisher { outcome: FakePublishOutcome::Success },
+            &now,
+        )
+        .expect("execute fake publish");
+
+        let saved = get_job_by_id(&mut conn, &job_id).expect("read published job");
+        let attempts = attempt_rows(&mut conn, &job_id);
+        assert_eq!(saved.status, "published");
+        assert_eq!(saved.attempt_count, 1);
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].success, 1);
+        assert_eq!(attempts[0].post_id.as_deref(), Some("fake-post-1"));
+    }
+
+    #[test]
+    fn worker_blocks_when_preflight_cannot_read_file() {
+        let workspace = test_workspace();
+        let missing_file = workspace.config.paths.workspace_dir.join("missing.md");
+        let job_id = insert_due_job(&workspace, &missing_file);
+        let now = now_rfc3339_utc();
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let job = claim_due_job(&mut conn, &job_id, &now)
+            .expect("claim job")
+            .expect("job is claimed");
+
+        execute_claimed_job(
+            &mut conn,
+            &job,
+            &FakeWorkerPublisher { outcome: FakePublishOutcome::Success },
+            &now,
+        )
+        .expect("record blocked result");
+
+        let saved = get_job_by_id(&mut conn, &job_id).expect("read blocked job");
+        let attempts = attempt_rows(&mut conn, &job_id);
+        assert_eq!(saved.status, "blocked");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].success, 0);
+        assert_eq!(attempts[0].error_type.as_deref(), Some("io_error"));
+    }
+
+    #[test]
+    fn worker_records_publish_failures_without_publishing() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "failure.md");
+        let job_id = insert_due_job(&workspace, &file);
+        let now = now_rfc3339_utc();
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let job = claim_due_job(&mut conn, &job_id, &now)
+            .expect("claim job")
+            .expect("job is claimed");
+
+        execute_claimed_job(
+            &mut conn,
+            &job,
+            &FakeWorkerPublisher { outcome: FakePublishOutcome::Failure },
+            &now,
+        )
+        .expect("record failed result");
+
+        let saved = get_job_by_id(&mut conn, &job_id).expect("read failed job");
+        let attempts = attempt_rows(&mut conn, &job_id);
+        assert_eq!(saved.status, "failed");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].success, 0);
+        assert_eq!(attempts[0].error_type.as_deref(), Some("http_error"));
+    }
+
+    #[test]
+    fn worker_claim_is_atomic_and_creates_one_attempt() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "claim.md");
+        let job_id = insert_due_job(&workspace, &file);
+        let now = now_rfc3339_utc();
+        let mut first = open_db(&workspace.config).expect("open first connection");
+        let mut second = open_db(&workspace.config).expect("open second connection");
+
+        assert!(claim_due_job(&mut first, &job_id, &now)
+            .expect("first claim")
+            .is_some());
+        assert!(claim_due_job(&mut second, &job_id, &now)
+            .expect("second claim")
+            .is_none());
+        assert_eq!(attempt_rows(&mut first, &job_id).len(), 1);
+    }
+
+    #[test]
+    fn dry_run_does_not_claim_or_create_attempts() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "dry-run.md");
+        let job_id = insert_due_job(&workspace, &file);
+
+        worker_run_dry_once(
+            WorkerRunArgs { dry_run: true, once: true },
+            &workspace.config,
+        )
+        .expect("run dry worker");
+
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let saved = get_job_by_id(&mut conn, &job_id).expect("read scheduled job");
+        assert_eq!(saved.status, "scheduled");
+        assert_eq!(saved.attempt_count, 0);
+        assert!(attempt_rows(&mut conn, &job_id).is_empty());
+    }
+
+    #[test]
+    fn database_rejects_rows_for_another_workspace() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "other-workspace.md");
+        let job_id = insert_due_job(&workspace, &file);
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let result = sql_query("UPDATE jobs SET workspace_id = ? WHERE id = ?")
+            .bind::<Text, _>(generate_id())
+            .bind::<Text, _>(&job_id)
+            .execute(&mut conn)
+            ;
+        assert!(result.is_err());
+        assert!(attempt_rows(&mut conn, &job_id).is_empty());
+    }
 }

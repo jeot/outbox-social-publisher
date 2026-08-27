@@ -200,8 +200,6 @@ pub(crate) struct JobReadyArgs {
     #[arg(long)]
     pub(crate) timezone: Option<String>,
     #[arg(long)]
-    pub(crate) workspace_id: Option<String>,
-    #[arg(long)]
     pub(crate) owner_user_id: Option<String>,
     #[arg(long, value_enum, default_value = "user")]
     pub(crate) by: OperatorArg,
@@ -257,8 +255,6 @@ pub(crate) struct JobAddScheduleArgs {
     pub(crate) at: String,
     #[arg(long)]
     pub(crate) timezone: Option<String>,
-    #[arg(long)]
-    pub(crate) workspace_id: Option<String>,
     #[arg(long)]
     pub(crate) owner_user_id: Option<String>,
     #[arg(long, value_enum, default_value = "user")]

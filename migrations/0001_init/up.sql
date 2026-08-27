@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   ai_note TEXT,
   ai_model TEXT,
   tags TEXT NOT NULL DEFAULT '[]',
+  selected_platforms TEXT NOT NULL DEFAULT '[]', -- Decision Queue selection before per-platform jobs exist
 
   -- Source content (always file-based; ad_hoc creation writes a file first)
   file_path TEXT NOT NULL,
@@ -100,6 +101,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_asset_ready
   ON jobs(asset_id)
   WHERE deleted_at IS NULL AND status = 'ready' AND platform IS NULL;
 
+CREATE TABLE IF NOT EXISTS workspace_meta (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  workspace_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TRIGGER jobs_workspace_identity_insert
+BEFORE INSERT ON jobs
+WHEN NOT EXISTS (SELECT 1 FROM workspace_meta WHERE singleton = 1)
+  OR NEW.workspace_id <> (SELECT workspace_id FROM workspace_meta WHERE singleton = 1)
+BEGIN
+  SELECT RAISE(ABORT, 'job workspace_id does not match database workspace identity');
+END;
+
+CREATE TRIGGER jobs_workspace_identity_update
+BEFORE UPDATE OF workspace_id ON jobs
+WHEN NEW.workspace_id <> (SELECT workspace_id FROM workspace_meta WHERE singleton = 1)
+BEGIN
+  SELECT RAISE(ABORT, 'job workspace_id does not match database workspace identity');
+END;
+
 CREATE TABLE IF NOT EXISTS publish_attempts (
   id TEXT PRIMARY KEY,                         -- UUID
   job_id TEXT NOT NULL,
@@ -151,3 +173,18 @@ CREATE INDEX IF NOT EXISTS idx_attempts_success_started
 
 CREATE INDEX IF NOT EXISTS idx_attempts_sync_scan
   ON publish_attempts(updated_at, deleted_at);
+
+CREATE TRIGGER attempts_workspace_identity_insert
+BEFORE INSERT ON publish_attempts
+WHEN NOT EXISTS (SELECT 1 FROM workspace_meta WHERE singleton = 1)
+  OR NEW.workspace_id <> (SELECT workspace_id FROM workspace_meta WHERE singleton = 1)
+BEGIN
+  SELECT RAISE(ABORT, 'attempt workspace_id does not match database workspace identity');
+END;
+
+CREATE TRIGGER attempts_workspace_identity_update
+BEFORE UPDATE OF workspace_id ON publish_attempts
+WHEN NEW.workspace_id <> (SELECT workspace_id FROM workspace_meta WHERE singleton = 1)
+BEGIN
+  SELECT RAISE(ABORT, 'attempt workspace_id does not match database workspace identity');
+END;
