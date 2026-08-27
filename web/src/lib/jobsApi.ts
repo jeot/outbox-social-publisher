@@ -5,6 +5,7 @@ export type JobItem = {
   selected_platforms?: string[]
   file_path: string
   run_at_utc: string | null
+  published_at: string | null
   timezone: string | null
   status_reason: string | null
   operator: string | null
@@ -64,6 +65,29 @@ export async function listReadyJobs(): Promise<JobItem[]> {
 export async function listScheduledJobs(): Promise<JobItem[]> {
   const response = await fetch("/api/jobs/scheduled")
   const data = await parseJsonResponse(response, "scheduled jobs API")
+  return Array.isArray(data.items) ? data.items : []
+}
+
+export async function listPublishingJobs(): Promise<JobItem[]> {
+  const response = await fetch("/api/jobs/publishing")
+  const data = await parseJsonResponse(response, "publishing jobs API")
+  return Array.isArray(data.items) ? data.items : []
+}
+
+export async function listFailedJobs(): Promise<JobItem[]> {
+  const response = await fetch("/api/jobs/failed")
+  const data = await parseJsonResponse(response, "failed jobs API")
+  return Array.isArray(data.items) ? data.items : []
+}
+
+export async function listPublishedJobs(): Promise<JobItem[]> {
+  const response = await fetch("/api/jobs/published")
+  const data = await parseJsonResponse(response, "published jobs API")
+  return Array.isArray(data.items) ? data.items : []
+}
+export async function listJobAttempts(id: string) {
+  const response = await fetch(`/api/jobs/attempts?id=${encodeURIComponent(id)}`)
+  const data = await parseJsonResponse(response, "attempts API")
   return Array.isArray(data.items) ? data.items : []
 }
 

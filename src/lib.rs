@@ -296,7 +296,12 @@ pub async fn run() -> ExitCode {
         }
     };
     let _ = dotenvy::from_filename_override(&config.paths.env_path);
-    let requires_writable_db = matches!(&cli.command, Commands::Job(_) | Commands::Serve(_));
+    let requires_writable_db = matches!(&cli.command, Commands::Job(_) | Commands::Serve(_))
+        || matches!(
+            &cli.command,
+            Commands::Worker(args)
+                if matches!(args.command, WorkerCommand::Run(ref run) if run.live)
+        );
     if requires_writable_db {
         if let Err(err) = ensure_db_ready(&config) {
             print_json(&err.to_output(), config.pretty_json);
@@ -336,7 +341,13 @@ pub async fn run() -> ExitCode {
             JobCommand::RunDebug(args) => job_run_debug(args, &config),
         },
         Commands::Worker(worker) => match worker.command {
-            WorkerCommand::Run(args) => worker_run_dry_once(args, &config),
+            WorkerCommand::Run(args) if args.dry_run => worker_run_dry_once(args, &config),
+            WorkerCommand::Run(args) if args.live => worker_run_live_once(args, &config).await,
+            WorkerCommand::Run(_) => Err(AppError::Validation {
+                message: "Choose exactly one worker mode: --dry-run or --live.".to_string(),
+                suggestion: Some("Use `publo worker run --dry-run --once`.".to_string()),
+                command: Some("publo worker run --dry-run --once".to_string()),
+            }),
         },
         Commands::Auth(auth) => match auth.platform {
             AuthPlatform::Linkedin(args) => match args.command {
@@ -1655,6 +1666,184 @@ fn worker_run_dry_once(args: WorkerRunArgs, config: &RuntimeConfig) -> Result<Va
     }))
 }
 
+async fn worker_run_live_once(
+    args: WorkerRunArgs,
+    config: &RuntimeConfig,
+) -> Result<Value, AppError> {
+    if !args.live || !args.once {
+        return Err(AppError::Validation {
+            message: "Only `publo worker run --live --once --pass <publish-pass>` is available currently.".to_string(),
+            suggestion: Some("Use the explicit one-job live pilot command.".to_string()),
+            command: Some("publo worker run --live --once --pass <publish-pass>".to_string()),
+        });
+    }
+    validate_publish_pass(args.pass.as_deref(), config)?;
+    let now = now_rfc3339_utc();
+    let mut conn = open_db(config)?;
+    let reconciled = reconcile_expired_worker_claims(&mut conn, &now)?;
+    let mut due_ids: Vec<IdRow> = sql_query(
+        "SELECT id FROM jobs
+         WHERE status = 'scheduled' AND run_at_utc IS NOT NULL AND run_at_utc <= ? AND deleted_at IS NULL
+         ORDER BY run_at_utc ASC, created_at ASC LIMIT 1",
+    )
+    .bind::<Text, _>(&now)
+    .load(&mut conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to find due job: {err}"),
+    })?;
+    let Some(due) = due_ids.pop() else {
+        return Ok(json!({
+            "ok": true,
+            "mode": "worker_live",
+            "once": true,
+            "processed": false,
+            "reconciled_count": reconciled.len()
+        }));
+    };
+    let Some(claimed) = claim_due_job(&mut conn, &due.id, &now)? else {
+        return Ok(json!({
+            "ok": true,
+            "mode": "worker_live",
+            "once": true,
+            "processed": false,
+            "reconciled_count": reconciled.len()
+        }));
+    };
+    let preflight = match preflight_job(&claimed.job, config) {
+        Ok(value) => value,
+        Err(error) => {
+            finish_worker_job_error(
+                &mut conn,
+                &claimed.job,
+                &claimed.claim_token,
+                "blocked",
+                &error,
+                &now,
+            )?;
+            return Ok(json!({
+                "ok": true,
+                "mode": "worker_live",
+                "once": true,
+                "processed": true,
+                "job_id": claimed.job.id,
+                "status": "blocked",
+                "reconciled_count": reconciled.len()
+            }));
+        }
+    };
+    let published = publish_worker_job(&claimed.job, config).await;
+    match published {
+        Ok(receipt) => {
+            finish_worker_job_success(
+                &mut conn,
+                &claimed.job,
+                &claimed.claim_token,
+                &preflight,
+                &receipt,
+                &now,
+            )?;
+            Ok(json!({
+                "ok": true,
+                "mode": "worker_live",
+                "once": true,
+                "processed": true,
+                "job_id": claimed.job.id,
+                "status": "published",
+                "reconciled_count": reconciled.len()
+            }))
+        }
+        Err(error) => {
+            finish_worker_job_error(
+                &mut conn,
+                &claimed.job,
+                &claimed.claim_token,
+                "failed",
+                &error,
+                &now,
+            )?;
+            Ok(json!({
+                "ok": true,
+                "mode": "worker_live",
+                "once": true,
+                "processed": true,
+                "job_id": claimed.job.id,
+                "status": "failed",
+                "reconciled_count": reconciled.len()
+            }))
+        }
+    }
+}
+
+async fn publish_worker_job(
+    job: &JobRow,
+    config: &RuntimeConfig,
+) -> Result<WorkerPublishReceipt, AppError> {
+    let value = match job.platform.as_deref() {
+        Some("linkedin") => {
+            publish_linkedin(
+                PublishLinkedinArgs {
+                    file: PathBuf::from(&job.file_path),
+                    pass: None,
+                    timeout_seconds: None,
+                    allow_duplicate: false,
+                    debug: false,
+                    add_signature: false,
+                    no_signature: false,
+                },
+                config,
+            )
+            .await?
+        }
+        Some("x") => {
+            publish_x(
+                PublishXArgs {
+                    file: PathBuf::from(&job.file_path),
+                    pass: None,
+                    timeout_seconds: None,
+                    allow_duplicate: false,
+                    allow_cashtag: false,
+                    allow_length: false,
+                    force: false,
+                    debug: false,
+                    add_signature: false,
+                    no_signature: false,
+                },
+                config,
+            )
+            .await?
+        }
+        Some(other) => {
+            return Err(AppError::Validation {
+                message: format!("Unsupported job platform: {other}"),
+                suggestion: None,
+                command: None,
+            });
+        }
+        None => {
+            return Err(AppError::Validation {
+                message: "Job has no platform.".to_string(),
+                suggestion: None,
+                command: None,
+            });
+        }
+    };
+    Ok(WorkerPublishReceipt {
+        post_id: value
+            .get("post_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        post_url: value
+            .get("post_url")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        request_id: value
+            .get("request_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        response: value,
+    })
+}
+
 const WORKER_CLAIM_EXPIRY_MINUTES: i64 = 5;
 
 #[derive(Debug, QueryableByName)]
@@ -1889,7 +2078,7 @@ fn finish_worker_job_success(
     sql_query(
         "UPDATE jobs
          SET status = 'published', status_reason = NULL, file_sha256 = ?, text_sha256 = ?, fingerprint = ?,
-             publish_claim_token = NULL, publishing_started_at = NULL,
+             publish_claim_token = NULL, publishing_started_at = NULL, published_at = ?,
              last_error_type = NULL, last_error_message = NULL, last_http_status = NULL,
              updated_at = ?, version = version + 1, synced_at = NULL, modified_by = 'local'
          WHERE id = ? AND status = 'publishing' AND publish_claim_token = ?",
@@ -1897,6 +2086,7 @@ fn finish_worker_job_success(
     .bind::<Text, _>(&preflight.file_sha256)
     .bind::<Text, _>(&preflight.text_sha256)
     .bind::<Text, _>(&preflight.fingerprint)
+    .bind::<Text, _>(now)
     .bind::<Text, _>(now)
     .bind::<Text, _>(&job.id)
     .bind::<Text, _>(claim_token)
@@ -4887,12 +5077,20 @@ mod worker_tests {
             .expect("age claim");
 
         let dry_output = worker_run_dry_once(
-            WorkerRunArgs { dry_run: true, once: true },
+            WorkerRunArgs {
+                dry_run: true,
+                live: false,
+                pass: None,
+                once: true,
+            },
             &workspace.config,
         )
         .expect("dry run");
         assert_eq!(dry_output["interrupted_count"].as_u64(), Some(1));
-        assert_eq!(get_job_by_id(&mut conn, &job_id).expect("read job").status, "publishing");
+        assert_eq!(
+            get_job_by_id(&mut conn, &job_id).expect("read job").status,
+            "publishing"
+        );
 
         let reconciled = reconcile_expired_worker_claims(&mut conn, &now).expect("reconcile claim");
         assert_eq!(reconciled.len(), 1);
@@ -4900,7 +5098,10 @@ mod worker_tests {
         let attempts = attempt_rows(&mut conn, &job_id);
         assert_eq!(saved.status, "blocked");
         assert_eq!(attempts[0].success, 0);
-        assert_eq!(attempts[0].error_type.as_deref(), Some("worker_interrupted"));
+        assert_eq!(
+            attempts[0].error_type.as_deref(),
+            Some("worker_interrupted")
+        );
     }
 
     #[test]
@@ -4910,7 +5111,12 @@ mod worker_tests {
         let job_id = insert_due_job(&workspace, &file);
 
         worker_run_dry_once(
-            WorkerRunArgs { dry_run: true, once: true },
+            WorkerRunArgs {
+                dry_run: true,
+                live: false,
+                pass: None,
+                once: true,
+            },
             &workspace.config,
         )
         .expect("run dry worker");

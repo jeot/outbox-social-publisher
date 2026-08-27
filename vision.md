@@ -104,3 +104,5 @@ Current direction:
 - scheduling and decision workflows stay easy
 - direct CLI publish commands can require an explicit publish password
 - AI-assisted workflows can prepare and verify, but publish only with deliberate authorization
+- automatic execution is introduced through a supervised real-content pilot before a continuous worker is enabled
+- an uncertain publish after a crash is surfaced for human review rather than retried automatically

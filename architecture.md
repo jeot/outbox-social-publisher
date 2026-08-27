@@ -221,6 +221,29 @@ Direct CLI publish commands are external-entry critical actions.
 * invalid/missing password fails before real publish logic executes.
 * this gate is CLI-only; internal app/worker execution paths are not expected to depend on CLI flags.
 
+### Worker rollout and crash safety
+
+Worker automation is introduced in two stages:
+
+1. A supervised pilot uses `publo worker run --dry-run --once` followed by an explicit
+   password-gated `publo worker run --live --once`.
+2. A continuous `--live` loop is enabled only after real scheduled publications establish
+   that claiming, preflight, provider execution, attempts, and UI state are trustworthy.
+
+The one-shot live worker processes only the oldest due job. It performs preflight again at
+execution time, atomically transitions the job from `scheduled` to `publishing`, creates an
+attempt, and then records `published`, `failed`, or `blocked`.
+
+An interrupted provider request is ambiguous: the provider may have accepted it before the
+local process crashed. Publo must not automatically retry such a job. A claim that remains
+in `publishing` for five minutes is considered stranded and is reconciled into a
+human-reviewable state on a later live worker run. Dry runs may report stranded claims but
+must never mutate them.
+
+The future continuous loop should poll for due work once per minute, use the same one-job
+claim/execution path as live one-shot mode, process one claim at a time, and survive an
+individual database or provider failure without weakening duplicate protection.
+
 ## Human control
 
 The system should optimize for low friction, not maximum automation at any cost.

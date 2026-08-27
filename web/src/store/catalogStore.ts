@@ -27,6 +27,17 @@ export type CatalogJobBadge = {
   platform: string | null
 }
 
+export type PublishAttempt = {
+  attempt_no: number
+  started_at: string
+  finished_at: string | null
+  success: boolean
+  error_type: string | null
+  error_message: string | null
+  request_id: string | null
+  post_url: string | null
+}
+
 type CatalogState = {
   roots: CatalogRoot[]
   readyByPath: Record<string, string | null>
@@ -48,6 +59,8 @@ type CatalogState = {
   selectedPreviewPublishable: boolean
   selectedFileLoading: boolean
   selectedFileError: string | null
+  selectedAttempts: PublishAttempt[]
+  setSelectedAttempts: (attempts: PublishAttempt[]) => void
   loadCatalog: () => Promise<void>
   selectFile: (path: string) => Promise<void>
   clearSelectedFile: () => void
@@ -81,6 +94,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
   selectedPreviewPublishable: false,
   selectedFileLoading: false,
   selectedFileError: null,
+  selectedAttempts: [],
+  setSelectedAttempts: (attempts) => set({ selectedAttempts: attempts }),
   loadCatalog: async () => {
     set({ loading: true, error: null })
     try {
@@ -134,7 +149,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
         loading: false,
         error:
           message.includes("Failed to fetch")
-            ? "Cannot reach Publo API. Start backend with `cargo run -- serve` (or `pnpm --dir web dev:full`)."
+            ? "Cannot reach Publo API. Start backend with `cargo run -- serve` " +
+              "(or `pnpm --dir web dev:full`)."
             : message,
       })
     }
@@ -144,6 +160,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedFilePath: path,
       selectedFileLoading: true,
       selectedFileError: null,
+      selectedAttempts: [],
       selectedFileContent: "",
       selectedPublishText: "",
       selectedPreviewMedia: [],
@@ -199,7 +216,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
           ...get().badgesByPath,
           [resolvedPath]: badgesFromJobs(jobs),
         },
-        readyByPath: Boolean(ready.is_ready)
+        readyByPath: ready.is_ready
           ? {
               ...get().readyByPath,
               [resolvedPath]: readyOperator,
@@ -241,6 +258,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedPreviewPublishable: false,
       selectedFileLoading: false,
       selectedFileError: null,
+      selectedAttempts: [],
     })
     clearLastSelectedFilePath()
   },

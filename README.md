@@ -19,6 +19,9 @@ Platform setup guides:
 - Token status/refresh commands for both platforms
 - Local-first parsing for Obsidian notes (`---` split + `![[...]]`)
 - Duplicate guard + JSONL publish log
+- SQLite scheduling lifecycle with immutable publish attempts
+- Supervised one-job live worker for LinkedIn and X
+- Local GUI for catalog, decision queue, scheduled, publishing, failed, and published states
 
 ## Feature matrix
 
@@ -81,7 +84,7 @@ publo publish linkedin --file ./post.md --pass <publish-pass>
 publo publish x --file ./post.md --pass <publish-pass>
 ```
 
-## Safe worker dry run
+## Worker pilot
 
 Inspect every due scheduled job without changing the database or sending a post:
 
@@ -89,7 +92,36 @@ Inspect every due scheduled job without changing the database or sending a post:
 publo worker run --dry-run --once
 ```
 
-The current worker supports only this safe mode. It reads due jobs, runs local file/media/auth preflight checks, and returns per-job JSON showing whether each item would publish. Live worker publishing is not implemented yet.
+The dry run reads all due jobs, performs current file/media/auth preflight checks, and
+returns per-job JSON showing whether each item would publish.
+
+Publish at most one due job under direct supervision:
+
+```bash
+publo worker run --live --once --pass <publish-pass>
+```
+
+`--live --once` claims and processes only the oldest due job. If multiple jobs are due,
+repeat the supervised command once per intended publication. Confirm the queue between
+runs with `--dry-run --once`; stop when `due_count` is `0`.
+
+### Seven-day supervised pilot
+
+Before enabling a continuous worker loop:
+
+1. Keep the first week small: one or two intentional publishing windows per day.
+2. Run `--dry-run --once` immediately before every live publishing session.
+3. Review each due item's file, platform, media, and local schedule time in the GUI.
+4. Run one live command, then confirm the result under Published or Decision Queue.
+5. If more jobs are due, repeat from the dry-run check rather than publishing a batch blindly.
+6. Do not move or rename a scheduled file after the final dry run.
+7. Stop the pilot on any unexpected content, platform, duplicate, provider error, or stranded
+   `publishing` state and investigate before the next live run.
+
+There is no automatic retry. An interrupted claim is considered unsafe to retry
+automatically because the provider may have accepted the post before the worker crashed.
+Claims left in `publishing` for five minutes are reconciled on a later live worker run and
+made visible for human review.
 
 ## Recommended local workflow (Obsidian-friendly)
 

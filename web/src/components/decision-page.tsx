@@ -5,6 +5,7 @@ import {
   listBlockedJobs,
   listCanceledJobs,
   listDisabledJobs,
+  listFailedJobs,
   listReadyJobs,
   scheduleJobMulti,
   setReadyJobTime,
@@ -18,6 +19,7 @@ import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { FailedJobsTable } from "@/components/failed-jobs-table"
 import {
   Dialog,
   DialogContent,
@@ -28,6 +30,7 @@ import {
 } from "@/components/ui/dialog"
 import { ScheduleControls } from "@/components/schedule-controls"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Table,
   TableBody,
@@ -48,6 +51,7 @@ export function DecisionPage() {
   const [blockedItems, setBlockedItems] = useState<JobItem[]>([])
   const [canceledItems, setCanceledItems] = useState<JobItem[]>([])
   const [disabledItems, setDisabledItems] = useState<JobItem[]>([])
+  const [failedItems, setFailedItems] = useState<JobItem[]>([])
   const [readyHasIssueById, setReadyHasIssueById] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -80,16 +84,18 @@ export function DecisionPage() {
     setLoading(true)
     setError(null)
     try {
-      const [ready, blocked, canceled, disabled] = await Promise.all([
+      const [ready, blocked, canceled, disabled, failed] = await Promise.all([
         listReadyJobs(),
         listBlockedJobs(),
         listCanceledJobs(),
         listDisabledJobs(),
+        listFailedJobs(),
       ])
       setReadyItems(ready)
       setBlockedItems(blocked)
       setCanceledItems(canceled)
       setDisabledItems(disabled)
+      setFailedItems(failed)
       const issueChecks = await Promise.all(
         ready.map(async (job) => ({
           id: job.id,
@@ -101,7 +107,7 @@ export function DecisionPage() {
       setReadyHasIssueById(nextIssueMap)
       setPlatformById((state) => {
         const updated = { ...state }
-        const decision = [...ready, ...blocked, ...canceled, ...disabled]
+        const decision = [...ready, ...blocked, ...canceled, ...disabled, ...failed]
         for (const job of decision) {
           const selected = Array.isArray(job.selected_platforms)
             ? job.selected_platforms
@@ -297,7 +303,10 @@ export function DecisionPage() {
                 </TableRow>
               ) : (
                 decisionItems
-                  .sort((a, b) => decisionStatusRank(a.status) - decisionStatusRank(b.status))
+                  .sort(
+                    (a, b) =>
+                      decisionStatusRank(a.status) - decisionStatusRank(b.status)
+                  )
                   .map((job) => {
                     const running = actionKey?.includes(job.id)
                     const savingPlatforms = Boolean(savingPlatformsById[job.id])
@@ -306,7 +315,9 @@ export function DecisionPage() {
                       ? job.selected_platforms
                       : []
                     const fallbackSelection: PlatformSelection = {
-                      linkedin: fallbackSelected.includes("linkedin") || job.platform === "linkedin",
+                      linkedin:
+                        fallbackSelected.includes("linkedin") ||
+                        job.platform === "linkedin",
                       x: fallbackSelected.includes("x") || job.platform === "x",
                     }
                     const selection = platformById[job.id] ?? fallbackSelection
@@ -315,7 +326,7 @@ export function DecisionPage() {
                     return (
                       <TableRow
                         key={job.id}
-                        className={`cursor-pointer ${selectedRowId === job.id ? "bg-blue-100/70 ring-1 ring-inset ring-blue-300 dark:bg-blue-950/40 dark:ring-blue-700 hover:bg-blue-100/70" : "hover:bg-muted/40"}`}
+                        className={selectedRowClass(selectedRowId === job.id)}
                         onClick={() => {
                           void selectRowForPreview(job)
                         }}
@@ -324,14 +335,7 @@ export function DecisionPage() {
                           <div className="flex flex-col gap-1">
                             <span className="whitespace-normal break-words">{fileName}</span>
                             <div className="flex flex-wrap gap-2">
-                              <Badge
-                                // className={
-                                //   isReady
-                                //     ? "bg-emerald-700 text-sm text-white"
-                                //     : "bg-red-600 text-sm text-white"
-                                // }
-                                variant={isReady ? "muted" : "destructive"}
-                              >
+                              <Badge variant={isReady ? "muted" : "destructive"}>
                                 {job.status}
                               </Badge>
                               <Badge variant="outline">{job.id.slice(0, 8)}</Badge>
@@ -351,14 +355,21 @@ export function DecisionPage() {
                             <Button
                               size="sm"
                               variant={selection.linkedin ? "default" : "outline"}
-                              className={selection.linkedin ? "bg-emerald-600 text-white hover:bg-emerald-700" : ""}
+                              className={
+                                selection.linkedin
+                                  ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                  : ""
+                              }
                               disabled={Boolean(running) || savingPlatforms}
                               onClick={() => {
                                 const nextSelection = {
                                   linkedin: !selection.linkedin,
                                   x: selection.x,
                                 }
-                                setPlatformById((state) => ({ ...state, [job.id]: nextSelection }))
+                                setPlatformById((state) => ({
+                                  ...state,
+                                  [job.id]: nextSelection,
+                                }))
                                 void persistPlatforms(job.id, nextSelection)
                               }}
                             >
@@ -367,14 +378,21 @@ export function DecisionPage() {
                             <Button
                               size="sm"
                               variant={selection.x ? "default" : "outline"}
-                              className={selection.x ? "bg-emerald-600 text-white hover:bg-emerald-700" : ""}
+                              className={
+                                selection.x
+                                  ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                  : ""
+                              }
                               disabled={Boolean(running) || savingPlatforms}
                               onClick={() => {
                                 const nextSelection = {
                                   linkedin: selection.linkedin,
                                   x: !selection.x,
                                 }
-                                setPlatformById((state) => ({ ...state, [job.id]: nextSelection }))
+                                setPlatformById((state) => ({
+                                  ...state,
+                                  [job.id]: nextSelection,
+                                }))
                                 void persistPlatforms(job.id, nextSelection)
                               }}
                             >
@@ -396,7 +414,10 @@ export function DecisionPage() {
                           />
                         </TableCell>
                         <TableCell>
-                          <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
+                          <div
+                            className="flex items-center gap-2"
+                            onClick={(event) => event.stopPropagation()}
+                          >
                             {canScheduleFromSuggestion(job, selection) ? (
                               <Button
                                 size="icon-sm"
@@ -431,7 +452,13 @@ export function DecisionPage() {
                               variant="outline"
                               disabled={Boolean(running) || savingPlatforms}
                               onClick={() => {
-                                if (!window.confirm("Remove this item from decision queue?")) return
+                                if (
+                                  !window.confirm(
+                                    "Remove this item from decision queue?"
+                                  )
+                                ) {
+                                  return
+                                }
                                 void runAction(`remove:${job.id}`, async () => {
                                   await unreadyJob(job.id)
                                 })
@@ -447,6 +474,16 @@ export function DecisionPage() {
               )}
             </TableBody>
           </Table>
+          <FailedJobsTable
+            items={failedItems}
+            selectedRowId={selectedRowId}
+            onSelect={(job) => {
+              void selectRowForPreview(job)
+            }}
+            onShowFile={(job) => {
+              void showFile(job.file_path)
+            }}
+          />
         </div>
       </div>
 
@@ -467,8 +504,9 @@ export function DecisionPage() {
           </DialogHeader>
           <div className="grid gap-3">
             <div className="grid gap-1">
-              <label className="text-xs text-muted-foreground">Date</label>
+              <Label htmlFor="decision-custom-date">Date</Label>
               <Input
+                id="decision-custom-date"
                 type="date"
                 value={customDialogDate}
                 onChange={(event) => {
@@ -481,8 +519,9 @@ export function DecisionPage() {
               />
             </div>
             <div className="grid gap-1">
-              <label className="text-xs text-muted-foreground">Time</label>
+              <Label htmlFor="decision-custom-time">Time</Label>
               <Input
+                id="decision-custom-time"
                 type="time"
                 value={customDialogTime}
                 onChange={(event) => {
@@ -571,6 +610,15 @@ function decisionStatusRank(status: string): number {
   }
 }
 
+function selectedRowClass(selected: boolean): string {
+  if (!selected) return "cursor-pointer hover:bg-muted/40"
+
+  return [
+    "cursor-pointer bg-blue-100/70 ring-1 ring-inset ring-blue-300",
+    "hover:bg-blue-100/70 dark:bg-blue-950/40 dark:ring-blue-700",
+  ].join(" ")
+}
+
 function formatRunAtLocal(rawUtc: string): string {
   const date = new Date(rawUtc)
   if (Number.isNaN(date.getTime())) return rawUtc
@@ -608,7 +656,7 @@ async function checkReadyFileHasIssue(filePath: string): Promise<boolean> {
     if (raw.trim().length === 0) return true
     const data: any = JSON.parse(raw)
     if (!data?.ok) return true
-    return !Boolean(data?.preview?.publishable)
+    return !data?.preview?.publishable
   } catch {
     return true
   }

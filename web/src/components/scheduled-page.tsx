@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import {
   cancelJob,
   listScheduledJobs,
+  listPublishingJobs,
   setScheduledJobTime,
   type JobItem,
 } from "@/lib/jobsApi"
@@ -15,6 +16,7 @@ import { useUiStore } from "@/store/uiStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScheduleControls } from "@/components/schedule-controls"
+import { PublishingCard } from "@/components/publishing-card"
 import {
   Dialog,
   DialogContent,
@@ -24,6 +26,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Table,
   TableBody,
@@ -36,6 +39,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 
 export function ScheduledPage() {
   const [scheduledItems, setScheduledItems] = useState<JobItem[]>([])
+  const [publishingItems, setPublishingItems] = useState<JobItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [actionKey, setActionKey] = useState<string | null>(null)
@@ -73,8 +77,12 @@ export function ScheduledPage() {
     setLoading(true)
     setError(null)
     try {
-      const scheduled = await listScheduledJobs()
+      const [scheduled, publishing] = await Promise.all([
+        listScheduledJobs(),
+        listPublishingJobs(),
+      ])
       setScheduledItems(scheduled)
+      setPublishingItems(publishing)
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to load jobs")
     } finally {
@@ -181,6 +189,13 @@ export function ScheduledPage() {
 
         {error ? <p className="mb-3 text-sm text-destructive">{error}</p> : null}
 
+        <PublishingCard
+          items={publishingItems}
+          onShowFile={(job) => {
+            void showFile(job.file_path)
+          }}
+        />
+
         <Table>
           <TableHeader>
             <TableRow>
@@ -205,7 +220,7 @@ export function ScheduledPage() {
                 return (
                   <TableRow
                     key={job.id}
-                    className={`cursor-pointer ${selectedRowId === job.id ? "bg-blue-100/70 ring-1 ring-inset ring-blue-300 dark:bg-blue-950/40 dark:ring-blue-700 hover:bg-blue-100/70" : "hover:bg-muted/40"}`}
+                    className={selectedRowClass(selectedRowId === job.id)}
                     onClick={() => {
                       void selectRowForPreview(job)
                     }}
@@ -233,7 +248,10 @@ export function ScheduledPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
+                      <div
+                        className="flex items-center gap-2"
+                        onClick={(event) => event.stopPropagation()}
+                      >
                         <Tooltip>
                           <TooltipTrigger
                             render={
@@ -263,7 +281,8 @@ export function ScheduledPage() {
                             void runAction(`cancel:${job.id}`, async () => {
                               await cancelJob(job.id)
                               toast.info(
-                                'The scheduled item was canceled. You can review it in the "Decision Queue" page.',
+                                "The scheduled item was canceled. You can review it " +
+                                  'in the "Decision Queue" page.',
                                 { duration: 30_000 }
                               )
                             })
@@ -297,8 +316,9 @@ export function ScheduledPage() {
           </DialogHeader>
           <div className="grid gap-3">
             <div className="grid gap-1">
-              <label className="text-xs text-muted-foreground">Date</label>
+              <Label htmlFor="scheduled-custom-date">Date</Label>
               <Input
+                id="scheduled-custom-date"
                 type="date"
                 value={customDialogDate}
                 onChange={(event) => {
@@ -311,8 +331,9 @@ export function ScheduledPage() {
               />
             </div>
             <div className="grid gap-1">
-              <label className="text-xs text-muted-foreground">Time</label>
+              <Label htmlFor="scheduled-custom-time">Time</Label>
               <Input
+                id="scheduled-custom-time"
                 type="time"
                 value={customDialogTime}
                 onChange={(event) => {
@@ -353,6 +374,15 @@ function utcMillis(raw: string | null): number | null {
   if (!raw) return null
   const value = Date.parse(raw)
   return Number.isNaN(value) ? null : value
+}
+
+function selectedRowClass(selected: boolean): string {
+  if (!selected) return "cursor-pointer hover:bg-muted/40"
+
+  return [
+    "cursor-pointer bg-blue-100/70 ring-1 ring-inset ring-blue-300",
+    "hover:bg-blue-100/70 dark:bg-blue-950/40 dark:ring-blue-700",
+  ].join(" ")
 }
 
 function formatRunAtLocal(rawUtc: string | null): string {

@@ -140,8 +140,12 @@ pub(crate) enum WorkerCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct WorkerRunArgs {
-    #[arg(long, required = true)]
+    #[arg(long, conflicts_with = "live")]
     pub(crate) dry_run: bool,
+    #[arg(long, conflicts_with = "dry_run")]
+    pub(crate) live: bool,
+    #[arg(long, required_if_eq("live", "true"))]
+    pub(crate) pass: Option<String>,
     #[arg(long, required = true)]
     pub(crate) once: bool,
 }

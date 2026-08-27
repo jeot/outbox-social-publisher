@@ -47,7 +47,8 @@ Bring X to feature parity with strong auth UX, validation, and publish safety.
 - [x] Document and enforce `media.write` scope requirement for X image posts.
 - [x] Add X token tooling parity commands (`auth x token-status`, `auth x token-refresh`).
 - [x] Add X manual auth exchange fallback (`auth x exchange`).
-- [ ] Integrate X into scheduler flow and retry/idempotency behavior.
+- [x] Integrate X into scheduler and supervised worker execution.
+- [ ] Add worker retry policy without weakening duplicate/idempotency safeguards.
 
 ## Phase 3 - Media (Images)
 
@@ -104,8 +105,8 @@ Add a minimal local GUI to validate the real scheduling workflow before implemen
 - [x] Show ready counts on folder/root nodes.
 - [x] Show AI-ready file badge variant (`Ready` + AI icon).
 - [x] Return file-level jobs array in catalog file API (`jobs: []` for selected file).
-- [x] Add Ready page/list showing `ready` jobs.
-- [x] Add actions from GUI: ready/unready, assign/remove platform, schedule/unschedule/cancel.
+- [x] Add Decision Queue showing `ready`, `blocked`, `canceled`, `disabled`, and `failed` jobs.
+- [x] Add GUI actions for ready/unready, platform selection, schedule/reschedule, cancel, and remove.
 - [x] Add schedule presets:
 - [x] today/tomorrow/next-week at 9:00 / 12:00 / 16:00 / 19:00.
 - [x] +5m / +30m / +1h / +3h.
@@ -118,11 +119,18 @@ Add a minimal local GUI to validate the real scheduling workflow before implemen
 Implement scheduled execution and attempt tracking on top of existing job lifecycle.
 
 - [x] Add one-shot dry-run worker (`publo worker run --dry-run --once`) that reads and preflights due jobs without state changes or network publishing.
-- [ ] Add `publo worker run` long-running process for due jobs.
-- [ ] Add atomic claim flow (`scheduled` -> `publishing`) to avoid duplicate execution.
-- [ ] Execute publish via existing platform adapters.
-- [ ] Write `publish_attempts` rows for every attempt.
-- [ ] Update job status (`published`/`failed`) with reason/error snapshots.
+- [x] Add password-gated supervised live worker (`publo worker run --live --once`) that processes at most one due job.
+- [x] Add atomic claim flow (`scheduled` -> `publishing`) to avoid duplicate execution.
+- [x] Execute worker publishes through existing LinkedIn and X platform adapters.
+- [x] Write `publish_attempts` rows for worker attempts.
+- [x] Update job status (`published`/`failed`/`blocked`) with error snapshots.
+- [x] Reconcile claims stranded in `publishing` for five minutes without automatically retrying an uncertain provider request.
+- [x] Add deterministic fake-provider tests for claim, success, preflight block, provider failure, crash, and workspace isolation behavior.
+- [ ] Complete a seven-day supervised live pilot with real scheduled content and review every result.
+- [ ] Define pilot exit criteria from observed runs: no duplicates, correct oldest-due ordering, understandable failures, and reliable attempt history.
+- [ ] Add `publo worker run --live` long-running loop with a one-minute due-job poll interval.
+- [ ] Add graceful shutdown and guarantee only one active claim is processed at a time.
+- [ ] Add loop-level resilience for database/provider errors without terminating the worker or bypassing claim safety.
 - [ ] Add retry policy with capped attempts and backoff.
 - [ ] Extend audit logging coverage to scheduled worker attempts and retries.
 - [ ] Add OS integration docs for background service mode (`launchd`, `systemd`, Task Scheduler).
@@ -132,7 +140,9 @@ Implement scheduled execution and attempt tracking on top of existing job lifecy
 Expand GUI after worker behavior is available.
 
 - [ ] Add richer schedule views (list/calendar).
-- [ ] Add job timeline with attempts/errors and retry actions.
+- [x] Add lifecycle views for publishing, failed, and published jobs.
+- [x] Add chronological publish-attempt details in the preview sidebar.
+- [ ] Add explicit retry/reschedule actions for failed jobs.
 - [ ] Add filters by platform/status/date.
 - [ ] Keep GUI as interface layer; keep publish/schedule logic in Rust core.
 

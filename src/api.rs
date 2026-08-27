@@ -70,6 +70,11 @@ struct JobIdPayload {
 }
 
 #[derive(Debug, Deserialize)]
+struct AttemptQuery {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct JobPlatformSetPayload {
     id: String,
     platform: String,
@@ -207,6 +212,8 @@ struct FileJobRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
     run_at_utc: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
+    published_at: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
     timezone: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
     status_reason: Option<String>,
@@ -271,6 +278,10 @@ pub async fn run_server(host: String, port: u16, config: RuntimeConfig) -> ExitC
         .route("/api/catalog/media", get(catalog_media))
         .route("/api/jobs/ready", get(ready_jobs))
         .route("/api/jobs/scheduled", get(scheduled_jobs))
+        .route("/api/jobs/publishing", get(publishing_jobs))
+        .route("/api/jobs/failed", get(failed_jobs))
+        .route("/api/jobs/published", get(published_jobs))
+        .route("/api/jobs/attempts", get(job_attempts))
         .route("/api/jobs/blocked", get(blocked_jobs))
         .route("/api/jobs/canceled", get(canceled_jobs))
         .route("/api/jobs/disabled", get(disabled_jobs))
@@ -734,6 +745,89 @@ async fn scheduled_jobs(State(state): State<ApiState>) -> Json<Value> {
         Ok(items) => Json(json!({ "ok": true, "items": items })),
         Err(message) => Json(json!({ "ok": false, "message": message, "items": [] })),
     }
+}
+
+async fn publishing_jobs(State(state): State<ApiState>) -> Json<Value> {
+    match list_jobs_by_status(state.db_path.as_path(), "publishing") {
+        Ok(items) => Json(json!({ "ok": true, "items": items })),
+        Err(message) => Json(json!({ "ok": false, "message": message, "items": [] })),
+    }
+}
+
+async fn failed_jobs(State(state): State<ApiState>) -> Json<Value> {
+    match list_jobs_by_status(state.db_path.as_path(), "failed") {
+        Ok(items) => Json(json!({ "ok": true, "items": items })),
+        Err(message) => Json(json!({ "ok": false, "message": message, "items": [] })),
+    }
+}
+
+async fn published_jobs(State(state): State<ApiState>) -> Json<Value> {
+    match list_jobs_by_status(state.db_path.as_path(), "published") {
+        Ok(items) => Json(json!({ "ok": true, "items": items })),
+        Err(message) => Json(json!({ "ok": false, "message": message, "items": [] })),
+    }
+}
+async fn job_attempts(
+    State(state): State<ApiState>,
+    Query(query): Query<AttemptQuery>,
+) -> Json<Value> {
+    let mut conn = match open_db_by_path(state.db_path.as_path()) {
+        Ok(conn) => conn,
+        Err(message) => return Json(json!({ "ok": false, "message": message })),
+    };
+    let rows: Result<Vec<AttemptApiRow>, _> = sql_query(
+        "SELECT attempt_no, started_at, finished_at, success, error_type, error_message, request_id, post_url
+         FROM publish_attempts
+         WHERE job_id = ?
+         ORDER BY attempt_no ASC",
+    )
+    .bind::<Text, _>(&query.id)
+    .load(&mut conn);
+
+    match rows {
+        Ok(rows) => {
+            let items: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "attempt_no": row.attempt_no,
+                        "started_at": row.started_at,
+                        "finished_at": row.finished_at,
+                        "success": row.success == 1,
+                        "error_type": row.error_type,
+                        "error_message": row.error_message,
+                        "request_id": row.request_id,
+                        "post_url": row.post_url
+                    })
+                })
+                .collect();
+            Json(json!({ "ok": true, "items": items }))
+        }
+        Err(err) => Json(json!({
+            "ok": false,
+            "message": format!("Failed to load attempts: {err}")
+        })),
+    }
+}
+
+#[derive(QueryableByName)]
+struct AttemptApiRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    attempt_no: i32,
+    #[diesel(sql_type = Text)]
+    started_at: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    finished_at: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    success: i32,
+    #[diesel(sql_type = Nullable<Text>)]
+    error_type: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    error_message: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    request_id: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    post_url: Option<String>,
 }
 
 async fn blocked_jobs(State(state): State<ApiState>) -> Json<Value> {
@@ -1808,7 +1902,7 @@ fn list_jobs_for_path(db_path: &Path, path: &Path) -> Result<Vec<Value>, String>
     let requested_str = path.to_string_lossy().to_string();
 
     let rows: Vec<FileJobRow> = sql_query(
-        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
          FROM jobs
          WHERE file_path = ? OR file_path = ?
          ORDER BY updated_at DESC, created_at DESC",
@@ -1842,6 +1936,7 @@ fn list_jobs_for_path(db_path: &Path, path: &Path) -> Result<Vec<Value>, String>
                 "selected_platforms": selected_platforms,
                 "file_path": row.file_path,
                 "run_at_utc": row.run_at_utc,
+                "published_at": row.published_at,
                 "timezone": row.timezone,
                 "status_reason": row.status_reason,
                 "attempt_count": row.attempt_count,
@@ -1858,7 +1953,7 @@ fn list_jobs_for_path(db_path: &Path, path: &Path) -> Result<Vec<Value>, String>
 fn list_jobs_by_status(db_path: &Path, status: &str) -> Result<Vec<Value>, String> {
     let mut conn = open_db_by_path(db_path)?;
     let rows: Vec<FileJobRow> = sql_query(
-        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
          FROM jobs
          WHERE status = ?
          ORDER BY COALESCE(run_at_utc, created_at) ASC, updated_at ASC",
@@ -1873,7 +1968,7 @@ fn list_jobs_by_status(db_path: &Path, status: &str) -> Result<Vec<Value>, Strin
 fn list_jobs_by_id(db_path: &Path, id: &str) -> Result<Option<Value>, String> {
     let mut conn = open_db_by_path(db_path)?;
     let mut rows: Vec<FileJobRow> = sql_query(
-        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
          FROM jobs
          WHERE id = ?
          LIMIT 1",
@@ -1907,6 +2002,7 @@ fn file_job_row_to_json(row: FileJobRow) -> Value {
         "selected_platforms": selected_platforms,
         "file_path": row.file_path,
         "run_at_utc": row.run_at_utc,
+        "published_at": row.published_at,
         "timezone": row.timezone,
         "status_reason": row.status_reason,
         "attempt_count": row.attempt_count,

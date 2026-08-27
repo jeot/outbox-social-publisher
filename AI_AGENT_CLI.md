@@ -11,6 +11,8 @@ Use this playbook when an AI agent operates Publo from terminal.
 - Best-effort only: do as much as possible, then report what could not be done and why.
 - Do not try to enforce impossible targets (for example not enough content).
 - File/path checks and duplicate protection are handled by Publo core.
+- Never invoke `publo worker run --live` or a real `publo publish` command. Live publishing
+  requires deliberate human authorization and is outside this content-management playbook.
 
 ## Core Commands
 

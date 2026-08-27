@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   attempt_count INTEGER NOT NULL DEFAULT 0,
   publish_claim_token TEXT,                    -- worker ownership token while status = publishing
   publishing_started_at TEXT,                  -- claim time; stranded publishing jobs require manual reconciliation
+  published_at TEXT,                           -- successful completion time
   last_error_type TEXT,
   last_error_message TEXT,
   last_http_status INTEGER,

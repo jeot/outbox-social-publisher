@@ -4,6 +4,7 @@ import { AppSidebar, type AppPage } from "@/components/app-sidebar"
 import { CatalogPage } from "@/components/catalog-page"
 import { DecisionPage } from "@/components/decision-page"
 import { PreviewSidebar } from "@/components/preview-sidebar"
+import { PublishedPage } from "@/components/published-page"
 import { RightSidebar } from "@/components/right-sidebar"
 import { ScheduledPage } from "@/components/scheduled-page"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
@@ -70,6 +71,8 @@ function MainContent({ activePage }: { activePage: AppPage }) {
       return <DecisionPage />
     case "scheduled":
       return <ScheduledPage />
+    case "published":
+      return <PublishedPage />
     default:
       return <CatalogPage />
   }
@@ -81,6 +84,8 @@ function getPageTitle(activePage: AppPage): string {
       return "Decision Queue"
     case "scheduled":
       return "Scheduled"
+    case "published":
+      return "Published"
     default:
       return "Catalog"
   }

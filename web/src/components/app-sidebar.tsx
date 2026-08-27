@@ -4,6 +4,7 @@ import {
   CheckCheck,
   FileText,
   FolderKanban,
+  History,
   Settings2,
   Sparkles,
   SunMoon,
@@ -23,7 +24,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
 
-export type AppPage = "catalog" | "ready" | "scheduled"
+export type AppPage = "catalog" | "ready" | "scheduled" | "published"
 
 const teams = [
   { name: "Publo", logo: <Sparkles className="size-4" />, plan: "Local mode" },
@@ -33,6 +34,7 @@ const pages: { key: AppPage; label: string; icon: React.ReactNode }[] = [
   { key: "catalog", label: "Catalog", icon: <FolderKanban /> },
   { key: "ready", label: "Decision Queue", icon: <CheckCheck /> },
   { key: "scheduled", label: "Scheduled", icon: <CalendarClock /> },
+  { key: "published", label: "Published", icon: <History /> },
 ]
 
 type AppSidebarProps = React.ComponentProps<typeof Sidebar> & {
