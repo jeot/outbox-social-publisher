@@ -2,6 +2,7 @@ import { Link2Icon } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { StatusBadge } from "@/components/status-badge"
 import {
   Table,
   TableBody,
@@ -58,7 +59,7 @@ export function FailedJobsTable({
                     {fileNameFromPath(job.file_path)}
                   </span>
                   <div className="flex flex-wrap gap-2">
-                    <Badge variant="destructive">failed</Badge>
+                    <StatusBadge status="failed" />
                     <Badge variant="outline">{job.id.slice(0, 8)}</Badge>
                   </div>
                 </div>

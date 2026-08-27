@@ -2,6 +2,7 @@ import { Link2Icon } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { StatusBadge } from "@/components/status-badge"
 import {
   Card,
   CardContent,
@@ -69,7 +70,7 @@ export function PublishingCard({
                   <Badge variant="secondary">{job.platform ?? "none"}</Badge>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="secondary">publishing</Badge>
+                  <StatusBadge status="publishing" />
                 </TableCell>
                 <TableCell>
                   <Tooltip>

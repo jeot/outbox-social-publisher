@@ -1,10 +1,13 @@
 import { ChevronRightIcon, FolderIcon } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
+import { Badge } from "@/components/ui/badge"
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
+import { StatusBadge } from "@/components/status-badge"
+import { statusBadgeClassName } from "@/lib/statusBadge"
 import {
   useCatalogStore,
   type CatalogJobBadge,
@@ -26,9 +29,24 @@ export function FileTree() {
   const clearTreeHighlight = useCatalogStore((state) => state.clearTreeHighlight)
   const fileElementRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const [openRootByPath, setOpenRootByPath] = useState<Record<string, boolean>>({})
+  const readyFilePathSet = new Set(
+    Object.entries(badgesByPath)
+      .filter(([, badges]) => badges.some((badge) => badge.status === "ready"))
+      .map(([path]) => path)
+  )
   const scheduledFilePathSet = new Set(
     Object.entries(badgesByPath)
       .filter(([, badges]) => badges.some((badge) => badge.status === "scheduled"))
+      .map(([path]) => path)
+  )
+  const publishedFilePathSet = new Set(
+    Object.entries(badgesByPath)
+      .filter(([, badges]) => badges.some((badge) => badge.status === "published"))
+      .map(([path]) => path)
+  )
+  const failedFilePathSet = new Set(
+    Object.entries(badgesByPath)
+      .filter(([, badges]) => badges.some((badge) => badge.status === "failed"))
       .map(([path]) => path)
   )
   const staleFilePathSet = new Set(
@@ -63,7 +81,10 @@ export function FileTree() {
     setOpenRootByPath((current) => {
       const next = { ...current }
       for (const entry of roots) {
-        if (highlightedFilePath === entry.root || highlightedFilePath.startsWith(`${entry.root}/`)) {
+        if (
+          highlightedFilePath === entry.root ||
+          highlightedFilePath.startsWith(`${entry.root}/`)
+        ) {
           next[entry.root] = true
         }
       }
@@ -103,7 +124,10 @@ export function FileTree() {
                 <Collapsible
                   open={openRootByPath[entry.root] ?? true}
                   onOpenChange={(open) =>
-                    setOpenRootByPath((current) => ({ ...current, [entry.root]: open }))
+                    setOpenRootByPath((current) => ({
+                      ...current,
+                      [entry.root]: open,
+                    }))
                   }
                   className="group/collapsible"
                 >
@@ -112,20 +136,61 @@ export function FileTree() {
                     <span className="ml-2 flex items-center gap-2">
                       {entry.ok ? (
                         (() => {
-                          const scheduledCount = fileCountInNodeList(entry.tree, scheduledFilePathSet)
-                          const staleCount = fileCountInNodeList(entry.tree, staleFilePathSet)
-                          if (scheduledCount < 1 && staleCount < 1) return null
+                          const readyCount = fileCountInNodeList(
+                            entry.tree,
+                            readyFilePathSet
+                          )
+                          const scheduledCount = fileCountInNodeList(
+                            entry.tree,
+                            scheduledFilePathSet
+                          )
+                          const publishedCount = fileCountInNodeList(
+                            entry.tree,
+                            publishedFilePathSet
+                          )
+                          const staleCount = fileCountInNodeList(
+                            entry.tree,
+                            staleFilePathSet
+                          )
+                          const failedCount = fileCountInNodeList(
+                            entry.tree,
+                            failedFilePathSet
+                          )
+                          if (
+                            readyCount < 1 &&
+                            scheduledCount < 1 &&
+                            publishedCount < 1 &&
+                            failedCount < 1 &&
+                            staleCount < 1
+                          ) {
+                            return null
+                          }
                           return (
                             <>
+                              {readyCount > 0 ? (
+                                <FolderCountBadge status="ready">
+                                  {readyCount}
+                                </FolderCountBadge>
+                              ) : null}
                               {scheduledCount > 0 ? (
-                                <span className="min-w-5 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-blue-700 normal-case">
+                                <FolderCountBadge status="scheduled">
                                   {scheduledCount}
-                                </span>
+                                </FolderCountBadge>
+                              ) : null}
+                              {publishedCount > 0 ? (
+                                <FolderCountBadge status="published">
+                                  {publishedCount}
+                                </FolderCountBadge>
+                              ) : null}
+                              {failedCount > 0 ? (
+                                <FolderCountBadge status="failed">
+                                  {failedCount}
+                                </FolderCountBadge>
                               ) : null}
                               {staleCount > 0 ? (
-                                <span className="min-w-5 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-rose-700 normal-case">
+                                <FolderCountBadge status="blocked">
                                   {staleCount}
-                                </span>
+                                </FolderCountBadge>
                               ) : null}
                             </>
                           )
@@ -146,7 +211,10 @@ export function FileTree() {
                             key={node.path}
                             node={node}
                             badgesByPath={badgesByPath}
+                            readyFilePathSet={readyFilePathSet}
                             scheduledFilePathSet={scheduledFilePathSet}
+                            publishedFilePathSet={publishedFilePathSet}
+                            failedFilePathSet={failedFilePathSet}
                             staleFilePathSet={staleFilePathSet}
                             selectedFilePath={selectedFilePath}
                             onSelectFile={selectFile}
@@ -178,7 +246,10 @@ function rootLabel(fullPath: string): string {
 function TreeNode({
   node,
   badgesByPath,
+  readyFilePathSet,
   scheduledFilePathSet,
+  publishedFilePathSet,
+  failedFilePathSet,
   staleFilePathSet,
   selectedFilePath,
   onSelectFile,
@@ -189,7 +260,10 @@ function TreeNode({
 }: {
   node: CatalogNode
   badgesByPath: Record<string, CatalogJobBadge[]>
+  readyFilePathSet: Set<string>
   scheduledFilePathSet: Set<string>
+  publishedFilePathSet: Set<string>
+  failedFilePathSet: Set<string>
   staleFilePathSet: Set<string>
   selectedFilePath: string | null
   onSelectFile: (path: string) => Promise<void>
@@ -223,12 +297,12 @@ function TreeNode({
           {displayBadges.length > 0 ? (
             <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
               {displayBadges.map((badge, idx) => (
-                <span
+                <StatusBadge
                   key={`${badge.label}-${idx}`}
-                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusBadgeClassName(badge.status)}`}
-                >
-                  {badge.label}
-                </span>
+                  status={badge.status}
+                  label={badge.label}
+                  className="h-auto rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                />
               ))}
             </span>
           ) : null}
@@ -237,28 +311,47 @@ function TreeNode({
     )
   }
 
+  const readyCount = fileCountInNode(node, readyFilePathSet)
   const scheduledCount = fileCountInNode(node, scheduledFilePathSet)
+  const publishedCount = fileCountInNode(node, publishedFilePathSet)
+  const failedCount = fileCountInNode(node, failedFilePathSet)
   const staleCount = fileCountInNode(node, staleFilePathSet)
   const open = expandedDirPaths.includes(node.path)
 
   return (
     <li>
-      <Collapsible open={open} onOpenChange={(next) => onSetDirOpen(node.path, next)}>
+      <Collapsible
+        open={open}
+        onOpenChange={(next) => onSetDirOpen(node.path, next)}
+      >
         <CollapsibleTrigger className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent">
           <span className="flex min-w-0 items-center gap-2">
             <FolderIcon className="size-4 shrink-0" />
             <span className="min-w-0 truncate">{node.name}</span>
           </span>
           <span className="ml-2 flex items-center gap-2">
+            {readyCount > 0 ? (
+              <FolderCountBadge status="ready">{readyCount}</FolderCountBadge>
+            ) : null}
             {scheduledCount > 0 ? (
-              <span className="min-w-5 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-blue-700">
+              <FolderCountBadge status="scheduled">
                 {scheduledCount}
-              </span>
+              </FolderCountBadge>
+            ) : null}
+            {publishedCount > 0 ? (
+              <FolderCountBadge status="published">
+                {publishedCount}
+              </FolderCountBadge>
+            ) : null}
+            {failedCount > 0 ? (
+              <FolderCountBadge status="failed">
+                {failedCount}
+              </FolderCountBadge>
             ) : null}
             {staleCount > 0 ? (
-              <span className="min-w-5 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-center text-[10px] font-semibold text-rose-700">
+              <FolderCountBadge status="blocked">
                 {staleCount}
-              </span>
+              </FolderCountBadge>
             ) : null}
             <ChevronRightIcon
               className={`size-4 shrink-0 transition-transform duration-200 ${open ? "rotate-90" : ""}`}
@@ -268,24 +361,43 @@ function TreeNode({
         <CollapsibleContent className="pl-8">
           <ul className="space-y-1">
             {(node.children ?? []).map((child) => (
-            <TreeNode
-              key={child.path}
-              node={child}
-              badgesByPath={badgesByPath}
-              scheduledFilePathSet={scheduledFilePathSet}
-              staleFilePathSet={staleFilePathSet}
-              selectedFilePath={selectedFilePath}
-              onSelectFile={onSelectFile}
-              expandedDirPaths={expandedDirPaths}
-              onSetDirOpen={onSetDirOpen}
-              highlightedFilePath={highlightedFilePath}
-              fileElementRefs={fileElementRefs}
+              <TreeNode
+                key={child.path}
+                node={child}
+                badgesByPath={badgesByPath}
+                readyFilePathSet={readyFilePathSet}
+                scheduledFilePathSet={scheduledFilePathSet}
+                publishedFilePathSet={publishedFilePathSet}
+                failedFilePathSet={failedFilePathSet}
+                staleFilePathSet={staleFilePathSet}
+                selectedFilePath={selectedFilePath}
+                onSelectFile={onSelectFile}
+                expandedDirPaths={expandedDirPaths}
+                onSetDirOpen={onSetDirOpen}
+                highlightedFilePath={highlightedFilePath}
+                fileElementRefs={fileElementRefs}
               />
             ))}
           </ul>
         </CollapsibleContent>
       </Collapsible>
     </li>
+  )
+}
+
+function FolderCountBadge({
+  status,
+  children,
+}: {
+  status: string
+  children: number
+}) {
+  return (
+    <Badge
+      className={`min-w-5 justify-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold normal-case ${statusBadgeClassName(status)}`}
+    >
+      {children}
+    </Badge>
   )
 }
 
@@ -343,27 +455,4 @@ function displayPlatform(platform: string | null): string {
 function statusLabel(status: string): string {
   if (status.length < 1) return status
   return status.charAt(0).toUpperCase() + status.slice(1)
-}
-
-function statusBadgeClassName(status: string): string {
-  switch (status) {
-    case "ready":
-      return "bg-emerald-600 text-white"
-    case "scheduled":
-      return "bg-blue-600 text-white"
-    case "publishing":
-      return "bg-indigo-600 text-white"
-    case "published":
-      return "bg-teal-600 text-white"
-    case "blocked":
-      return "bg-rose-500/15 text-rose-700"
-    case "failed":
-      return "bg-red-600 text-white"
-    case "canceled":
-      return "bg-rose-500/15 text-rose-700"
-    case "disabled":
-      return "bg-rose-500/15 text-rose-700"
-    default:
-      return "bg-muted text-foreground"
-  }
 }

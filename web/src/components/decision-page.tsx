@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { ScheduleControls } from "@/components/schedule-controls"
+import { StatusBadge } from "@/components/status-badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -335,9 +336,7 @@ export function DecisionPage() {
                           <div className="flex flex-col gap-1">
                             <span className="whitespace-normal break-words">{fileName}</span>
                             <div className="flex flex-wrap gap-2">
-                              <Badge variant={isReady ? "muted" : "destructive"}>
-                                {job.status}
-                              </Badge>
+                              <StatusBadge status={job.status} />
                               <Badge variant="outline">{job.id.slice(0, 8)}</Badge>
                               {job.operator === "ai" ? (
                                 <SparklesIcon className="size-4 text-emerald-500" />

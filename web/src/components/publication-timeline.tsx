@@ -1,4 +1,4 @@
-import { Badge } from "@/components/ui/badge"
+import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -36,7 +36,7 @@ export function PublicationTimeline({
       <CardContent className="space-y-4">
         {publication?.imported ? (
           <div className="border-l-2 border-muted pl-3 text-xs">
-            <Badge variant="secondary">Imported as published</Badge>
+            <StatusBadge status="published" label="Imported as published" />
             <div className="mt-2 space-y-1 text-muted-foreground">
               <p>
                 Published: {formatAttemptTime(publication.publishedAt, "Date unknown")}
@@ -52,17 +52,10 @@ export function PublicationTimeline({
             key={attempt.attempt_no}
             className="border-l-2 border-muted pl-3 text-xs"
           >
-            <Badge
-              variant={
-                attempt.finished_at === null
-                  ? "outline"
-                  : attempt.success
-                    ? "secondary"
-                    : "destructive"
-              }
-            >
-              Attempt {attempt.attempt_no}: {attemptStatus(attempt)}
-            </Badge>
+            <StatusBadge
+              status={attemptStatus(attempt)}
+              label={`Attempt ${attempt.attempt_no}: ${attemptStatus(attempt)}`}
+            />
             <div className="mt-2 space-y-1 text-muted-foreground">
               <p>Started: {formatAttemptTime(attempt.started_at, "Unknown")}</p>
               <p>Finished: {formatAttemptTime(attempt.finished_at, "Pending")}</p>
