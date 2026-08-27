@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- Lifecycle metadata
   status_reason TEXT,                          -- human-readable reason for blocked/canceled/failed transitions
   attempt_count INTEGER NOT NULL DEFAULT 0,
+  publish_claim_token TEXT,                    -- worker ownership token while status = publishing
+  publishing_started_at TEXT,                  -- claim time; stranded publishing jobs require manual reconciliation
   last_error_type TEXT,
   last_error_message TEXT,
   last_http_status INTEGER,
@@ -130,6 +132,7 @@ CREATE TABLE IF NOT EXISTS publish_attempts (
   workspace_id TEXT NOT NULL DEFAULT 'default',
   owner_user_id TEXT,
   trigger_mode TEXT NOT NULL CHECK (trigger_mode IN ('worker', 'manual')),
+  claim_token TEXT,
 
   started_at TEXT NOT NULL,
   finished_at TEXT,

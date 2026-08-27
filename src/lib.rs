@@ -1592,6 +1592,7 @@ fn worker_run_dry_once(args: WorkerRunArgs, config: &RuntimeConfig) -> Result<Va
 
     let now = now_rfc3339_utc();
     let mut conn = open_db(config)?;
+    let interrupted = find_expired_worker_claims(&mut conn, &now)?;
     let due_jobs: Vec<JobRow> = sql_query(
         "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
          FROM jobs
@@ -1645,11 +1646,115 @@ fn worker_run_dry_once(args: WorkerRunArgs, config: &RuntimeConfig) -> Result<Va
         "db_changed": false,
         "now_utc": now,
         "workspace_id": config.workspace_id,
+        "interrupted_count": interrupted.len(),
+        "interrupted_items": interrupted.iter().map(expired_claim_to_json).collect::<Vec<_>>(),
         "due_count": items.len(),
         "publishable_count": publishable_count,
         "blocked_count": blocked_count,
         "items": items
     }))
+}
+
+const WORKER_CLAIM_EXPIRY_MINUTES: i64 = 5;
+
+#[derive(Debug, QueryableByName)]
+struct ExpiredWorkerClaimRow {
+    #[diesel(sql_type = Text)]
+    id: String,
+    #[diesel(sql_type = Integer)]
+    attempt_count: i32,
+    #[diesel(sql_type = Nullable<Text>)]
+    publish_claim_token: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    publishing_started_at: Option<String>,
+}
+
+fn find_expired_worker_claims(
+    conn: &mut SqliteConnection,
+    now: &str,
+) -> Result<Vec<ExpiredWorkerClaimRow>, AppError> {
+    let now = chrono::DateTime::parse_from_rfc3339(now).map_err(|err| AppError::Io {
+        message: format!("Failed to parse worker clock: {err}"),
+    })?;
+    let expires_before = (now - chrono::Duration::minutes(WORKER_CLAIM_EXPIRY_MINUTES)).to_rfc3339();
+    sql_query(
+        "SELECT id, attempt_count, publish_claim_token, publishing_started_at
+         FROM jobs
+         WHERE status = 'publishing'
+           AND publishing_started_at IS NOT NULL
+           AND publishing_started_at <= ?
+         ORDER BY publishing_started_at ASC",
+    )
+    .bind::<Text, _>(&expires_before)
+    .load(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to find expired worker claims: {err}"),
+    })
+}
+
+fn expired_claim_to_json(claim: &ExpiredWorkerClaimRow) -> Value {
+    json!({
+        "job_id": claim.id,
+        "attempt_no": claim.attempt_count,
+        "publishing_started_at": claim.publishing_started_at,
+        "reason": "Publishing outcome unknown: worker claim expired before completion. Verify the platform before rescheduling."
+    })
+}
+
+#[allow(dead_code)] // Called by the future --live worker before each due-job scan.
+fn reconcile_expired_worker_claims(
+    conn: &mut SqliteConnection,
+    now: &str,
+) -> Result<Vec<ExpiredWorkerClaimRow>, AppError> {
+    let claims = find_expired_worker_claims(conn, now)?;
+    for claim in &claims {
+        let Some(token) = claim.publish_claim_token.as_deref() else {
+            continue;
+        };
+        let reason = "Publishing outcome unknown: worker claim expired before completion. Verify the platform before rescheduling.";
+        let response_json = json!({
+            "ok": false,
+            "error_type": "worker_interrupted",
+            "message": reason,
+            "retryable": false
+        })
+        .to_string();
+        sql_query(
+            "UPDATE publish_attempts
+             SET finished_at = ?, success = 0, error_type = 'worker_interrupted', error_message = ?,
+                 response_json = ?, updated_at = ?, version = version + 1
+             WHERE job_id = ? AND attempt_no = ? AND trigger_mode = 'worker' AND claim_token = ? AND finished_at IS NULL",
+        )
+        .bind::<Text, _>(now)
+        .bind::<Text, _>(reason)
+        .bind::<Text, _>(&response_json)
+        .bind::<Text, _>(now)
+        .bind::<Text, _>(&claim.id)
+        .bind::<Integer, _>(claim.attempt_count)
+        .bind::<Text, _>(token)
+        .execute(conn)
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to close interrupted worker attempt: {err}"),
+        })?;
+        sql_query(
+            "UPDATE jobs
+             SET status = 'blocked', status_reason = ?, last_error_type = 'worker_interrupted',
+                 last_error_message = ?, last_http_status = NULL,
+                 publish_claim_token = NULL, publishing_started_at = NULL,
+                 updated_at = ?, version = version + 1, synced_at = NULL, modified_by = 'local'
+             WHERE id = ? AND status = 'publishing' AND publish_claim_token = ?",
+        )
+        .bind::<Text, _>(reason)
+        .bind::<Text, _>(reason)
+        .bind::<Text, _>(now)
+        .bind::<Text, _>(&claim.id)
+        .bind::<Text, _>(token)
+        .execute(conn)
+        .map_err(|err| AppError::Io {
+            message: format!("Failed to block interrupted worker job: {err}"),
+        })?;
+    }
+    Ok(claims)
 }
 
 #[derive(Debug, Clone)]
@@ -1659,6 +1764,12 @@ struct WorkerPublishReceipt {
     post_url: Option<String>,
     request_id: Option<String>,
     response: Value,
+}
+
+#[allow(dead_code)] // Reused by the live worker after its safe test phase.
+struct ClaimedWorkerJob {
+    job: JobRow,
+    claim_token: String,
 }
 
 /// The live worker will implement this with the real platform publishers. Tests use a local fake.
@@ -1677,12 +1788,15 @@ fn claim_due_job(
     conn: &mut SqliteConnection,
     job_id: &str,
     now: &str,
-) -> Result<Option<JobRow>, AppError> {
+) -> Result<Option<ClaimedWorkerJob>, AppError> {
+    let claim_token = generate_id();
     conn.immediate_transaction::<Option<JobRow>, diesel::result::Error, _>(|conn| {
         let changed = sql_query(
             "UPDATE jobs
              SET status = 'publishing',
                  attempt_count = attempt_count + 1,
+                 publish_claim_token = ?,
+                 publishing_started_at = ?,
                  updated_at = ?,
                  version = version + 1,
                  synced_at = NULL,
@@ -1693,6 +1807,8 @@ fn claim_due_job(
                AND run_at_utc <= ?
                AND deleted_at IS NULL",
         )
+        .bind::<Text, _>(&claim_token)
+        .bind::<Text, _>(now)
         .bind::<Text, _>(now)
         .bind::<Text, _>(job_id)
         .bind::<Text, _>(now)
@@ -1711,9 +1827,9 @@ fn claim_due_job(
 
         sql_query(
             "INSERT INTO publish_attempts (
-                id, job_id, attempt_no, platform, workspace_id, owner_user_id, trigger_mode,
+                id, job_id, attempt_no, platform, workspace_id, owner_user_id, trigger_mode, claim_token,
                 started_at, success, created_at, updated_at, modified_by
-             ) VALUES (?, ?, ?, ?, ?, ?, 'worker', ?, 0, ?, ?, 'local')",
+             ) VALUES (?, ?, ?, ?, ?, ?, 'worker', ?, ?, 0, ?, ?, 'local')",
         )
         .bind::<Text, _>(generate_id())
         .bind::<Text, _>(&job.id)
@@ -1721,6 +1837,7 @@ fn claim_due_job(
         .bind::<Text, _>(job.platform.as_deref().unwrap_or_default())
         .bind::<Text, _>(&job.workspace_id)
         .bind::<Nullable<Text>, _>(job.owner_user_id.as_deref())
+        .bind::<Text, _>(&claim_token)
         .bind::<Text, _>(now)
         .bind::<Text, _>(now)
         .bind::<Text, _>(now)
@@ -1728,6 +1845,7 @@ fn claim_due_job(
 
         Ok(Some(job))
     })
+    .map(|job| job.map(|job| ClaimedWorkerJob { job, claim_token }))
     .map_err(|err| AppError::Io {
         message: format!("Failed to claim due job {job_id}: {err}"),
     })
@@ -1737,6 +1855,7 @@ fn claim_due_job(
 fn finish_worker_job_success(
     conn: &mut SqliteConnection,
     job: &JobRow,
+    claim_token: &str,
     preflight: &JobPreflightResult,
     receipt: &WorkerPublishReceipt,
     now: &str,
@@ -1748,7 +1867,7 @@ fn finish_worker_job_success(
         "UPDATE publish_attempts
          SET finished_at = ?, success = 1, response_json = ?, post_id = ?, post_url = ?, request_id = ?,
              file_sha256 = ?, text_sha256 = ?, fingerprint = ?, updated_at = ?, version = version + 1
-         WHERE job_id = ? AND attempt_no = ? AND trigger_mode = 'worker'",
+         WHERE job_id = ? AND attempt_no = ? AND trigger_mode = 'worker' AND claim_token = ?",
     )
     .bind::<Text, _>(now)
     .bind::<Text, _>(&response_json)
@@ -1761,6 +1880,7 @@ fn finish_worker_job_success(
     .bind::<Text, _>(now)
     .bind::<Text, _>(&job.id)
     .bind::<Integer, _>(job.attempt_count)
+    .bind::<Text, _>(claim_token)
     .execute(conn)
     .map_err(|err| AppError::Io {
         message: format!("Failed to finish successful publish attempt: {err}"),
@@ -1769,15 +1889,17 @@ fn finish_worker_job_success(
     sql_query(
         "UPDATE jobs
          SET status = 'published', status_reason = NULL, file_sha256 = ?, text_sha256 = ?, fingerprint = ?,
+             publish_claim_token = NULL, publishing_started_at = NULL,
              last_error_type = NULL, last_error_message = NULL, last_http_status = NULL,
              updated_at = ?, version = version + 1, synced_at = NULL, modified_by = 'local'
-         WHERE id = ? AND status = 'publishing'",
+         WHERE id = ? AND status = 'publishing' AND publish_claim_token = ?",
     )
     .bind::<Text, _>(&preflight.file_sha256)
     .bind::<Text, _>(&preflight.text_sha256)
     .bind::<Text, _>(&preflight.fingerprint)
     .bind::<Text, _>(now)
     .bind::<Text, _>(&job.id)
+    .bind::<Text, _>(claim_token)
     .execute(conn)
     .map_err(|err| AppError::Io {
         message: format!("Failed to mark worker job published: {err}"),
@@ -1789,6 +1911,7 @@ fn finish_worker_job_success(
 fn finish_worker_job_error(
     conn: &mut SqliteConnection,
     job: &JobRow,
+    claim_token: &str,
     status: &str,
     error: &AppError,
     now: &str,
@@ -1801,7 +1924,7 @@ fn finish_worker_job_error(
         "UPDATE publish_attempts
          SET finished_at = ?, success = 0, error_type = ?, error_message = ?, http_status = ?, response_json = ?,
              updated_at = ?, version = version + 1
-         WHERE job_id = ? AND attempt_no = ? AND trigger_mode = 'worker'",
+         WHERE job_id = ? AND attempt_no = ? AND trigger_mode = 'worker' AND claim_token = ?",
     )
     .bind::<Text, _>(now)
     .bind::<Text, _>(output.error_type)
@@ -1811,6 +1934,7 @@ fn finish_worker_job_error(
     .bind::<Text, _>(now)
     .bind::<Text, _>(&job.id)
     .bind::<Integer, _>(job.attempt_count)
+    .bind::<Text, _>(claim_token)
     .execute(conn)
     .map_err(|err| AppError::Io {
         message: format!("Failed to finish failed publish attempt: {err}"),
@@ -1819,8 +1943,9 @@ fn finish_worker_job_error(
     sql_query(
         "UPDATE jobs
          SET status = ?, status_reason = ?, last_error_type = ?, last_error_message = ?, last_http_status = ?,
+             publish_claim_token = NULL, publishing_started_at = NULL,
              updated_at = ?, version = version + 1, synced_at = NULL, modified_by = 'local'
-         WHERE id = ? AND status = 'publishing'",
+         WHERE id = ? AND status = 'publishing' AND publish_claim_token = ?",
     )
     .bind::<Text, _>(status)
     .bind::<Text, _>(&output.message)
@@ -1829,6 +1954,7 @@ fn finish_worker_job_error(
     .bind::<Nullable<Integer>, _>(output.http_status.map(i32::from))
     .bind::<Text, _>(now)
     .bind::<Text, _>(&job.id)
+    .bind::<Text, _>(claim_token)
     .execute(conn)
     .map_err(|err| AppError::Io {
         message: format!("Failed to finalize worker job error: {err}"),
@@ -1840,19 +1966,20 @@ fn finish_worker_job_error(
 fn execute_claimed_job(
     conn: &mut SqliteConnection,
     job: &JobRow,
+    claim_token: &str,
     publisher: &dyn WorkerPublisher,
     now: &str,
 ) -> Result<(), AppError> {
     let preflight = match publisher.preflight(job) {
         Ok(preflight) => preflight,
         Err(error) => {
-            finish_worker_job_error(conn, job, "blocked", &error, now)?;
+            finish_worker_job_error(conn, job, claim_token, "blocked", &error, now)?;
             return Ok(());
         }
     };
     match publisher.publish(job, &preflight) {
-        Ok(receipt) => finish_worker_job_success(conn, job, &preflight, &receipt, now),
-        Err(error) => finish_worker_job_error(conn, job, "failed", &error, now),
+        Ok(receipt) => finish_worker_job_success(conn, job, claim_token, &preflight, &receipt, now),
+        Err(error) => finish_worker_job_error(conn, job, claim_token, "failed", &error, now),
     }
 }
 
@@ -4627,7 +4754,8 @@ mod worker_tests {
 
         execute_claimed_job(
             &mut conn,
-            &job,
+            &job.job,
+            &job.claim_token,
             &FakeWorkerPublisher { outcome: FakePublishOutcome::Success },
             &now,
         )
@@ -4655,7 +4783,8 @@ mod worker_tests {
 
         execute_claimed_job(
             &mut conn,
-            &job,
+            &job.job,
+            &job.claim_token,
             &FakeWorkerPublisher { outcome: FakePublishOutcome::Success },
             &now,
         )
@@ -4682,7 +4811,8 @@ mod worker_tests {
 
         execute_claimed_job(
             &mut conn,
-            &job,
+            &job.job,
+            &job.claim_token,
             &FakeWorkerPublisher { outcome: FakePublishOutcome::Failure },
             &now,
         )
@@ -4712,6 +4842,65 @@ mod worker_tests {
             .expect("second claim")
             .is_none());
         assert_eq!(attempt_rows(&mut first, &job_id).len(), 1);
+    }
+
+    #[test]
+    fn interrupted_publish_is_not_automatically_retried() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "interrupted.md");
+        let job_id = insert_due_job(&workspace, &file);
+        let now = now_rfc3339_utc();
+        let mut first = open_db(&workspace.config).expect("open first connection");
+        let claimed = claim_due_job(&mut first, &job_id, &now)
+            .expect("claim job")
+            .expect("job is claimed");
+
+        let publisher = FakeWorkerPublisher { outcome: FakePublishOutcome::Success };
+        let preflight = publisher.preflight(&claimed.job).expect("fake preflight");
+        let _receipt = publisher.publish(&claimed.job, &preflight).expect("provider accepted post");
+        drop(first); // Simulate process death before Publo records completion.
+
+        let mut restarted = open_db(&workspace.config).expect("open restarted connection");
+        assert!(claim_due_job(&mut restarted, &job_id, &now)
+            .expect("retry claim")
+            .is_none());
+        let saved = get_job_by_id(&mut restarted, &job_id).expect("read stranded job");
+        assert_eq!(saved.status, "publishing");
+        assert_eq!(attempt_rows(&mut restarted, &job_id).len(), 1);
+    }
+
+    #[test]
+    fn expired_claim_is_reported_then_reconciled_as_blocked() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "expired-claim.md");
+        let job_id = insert_due_job(&workspace, &file);
+        let now = now_rfc3339_utc();
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let _claim = claim_due_job(&mut conn, &job_id, &now)
+            .expect("claim job")
+            .expect("job is claimed");
+        let expired_at = (Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
+        sql_query("UPDATE jobs SET publishing_started_at = ? WHERE id = ?")
+            .bind::<Text, _>(&expired_at)
+            .bind::<Text, _>(&job_id)
+            .execute(&mut conn)
+            .expect("age claim");
+
+        let dry_output = worker_run_dry_once(
+            WorkerRunArgs { dry_run: true, once: true },
+            &workspace.config,
+        )
+        .expect("dry run");
+        assert_eq!(dry_output["interrupted_count"].as_u64(), Some(1));
+        assert_eq!(get_job_by_id(&mut conn, &job_id).expect("read job").status, "publishing");
+
+        let reconciled = reconcile_expired_worker_claims(&mut conn, &now).expect("reconcile claim");
+        assert_eq!(reconciled.len(), 1);
+        let saved = get_job_by_id(&mut conn, &job_id).expect("read blocked job");
+        let attempts = attempt_rows(&mut conn, &job_id);
+        assert_eq!(saved.status, "blocked");
+        assert_eq!(attempts[0].success, 0);
+        assert_eq!(attempts[0].error_type.as_deref(), Some("worker_interrupted"));
     }
 
     #[test]
