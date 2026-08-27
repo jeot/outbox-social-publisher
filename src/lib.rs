@@ -313,8 +313,8 @@ pub async fn run() -> ExitCode {
             WorkspaceCommand::Switch(args) => workspace_switch(args),
         },
         Commands::Publish(publish) => match publish.platform {
-            PublishPlatform::Linkedin(args) => publish_linkedin(args, &config).await,
-            PublishPlatform::X(args) => publish_x(args, &config).await,
+            PublishPlatform::Linkedin(args) => publish_linkedin_cli(args, &config).await,
+            PublishPlatform::X(args) => publish_x_cli(args, &config).await,
         },
         Commands::Job(job) => match job.command {
             JobCommand::Ready(args) => job_ready(args, &config),
@@ -2751,10 +2751,20 @@ async fn run_linkedin_token_refresh(config: &RuntimeConfig) -> Result<Value, App
     }))
 }
 
-async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+async fn publish_linkedin_cli(
+    args: PublishLinkedinArgs,
+    config: &RuntimeConfig,
+) -> Result<Value, AppError> {
     if !args.debug {
         validate_publish_pass(args.pass.as_deref(), config)?;
     }
+    publish_linkedin(args, config).await
+}
+
+async fn publish_linkedin(
+    args: PublishLinkedinArgs,
+    config: &RuntimeConfig,
+) -> Result<Value, AppError> {
     if !args.file.exists() {
         return Err(AppError::Validation {
             message: format!("Content file does not exist: {}", args.file.display()),
@@ -3059,10 +3069,14 @@ async fn publish_linkedin(args: PublishLinkedinArgs, config: &RuntimeConfig) -> 
     Ok(value)
 }
 
-async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+async fn publish_x_cli(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     if !args.debug {
         validate_publish_pass(args.pass.as_deref(), config)?;
     }
+    publish_x(args, config).await
+}
+
+async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     if !args.file.exists() {
         return Err(AppError::Validation {
             message: format!("Content file does not exist: {}", args.file.display()),

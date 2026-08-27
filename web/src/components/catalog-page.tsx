@@ -122,7 +122,7 @@ export function CatalogPage() {
           selectedFileLoading={selectedFileLoading}
           selectedFileError={selectedFileError}
           selectedFileContent={selectedFileContent}
-          className={`flex min-w-0 flex-1 flex-col rounded-xl border bg-card ${canUseHorizontalCatalogLayout ? "min-w-[320px]" : "min-w-0"}`}
+          className={`flex min-w-0 flex-1 flex-col rounded-xl border bg-card ${canUseHorizontalCatalogLayout ? "min-w-[320px] self-start sticky top-4" : "min-w-0"}`}
         />
       </div>
     </div>

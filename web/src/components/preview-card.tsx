@@ -79,54 +79,52 @@ export function PreviewCard({
               </div>
             </div>
 
-            <div className="space-y-2 rounded-md border bg-muted/20 p-3 text-xs">
+            <div className="space-y-2 rounded-md border bg-muted/20 p-2 g-2 text-xs">
               <div>
-                <p className="font-medium text-muted-foreground">File Name</p>
-                <p className="break-all">{selectedFileName || "-"}</p>
+                <p className="font-bold text-muted-foreground">File Name</p>
+                <p className="text-sm text-muted-foreground break-all">{selectedFileName || "-"}</p>
               </div>
               <div>
-                <p className="font-medium text-muted-foreground">File Path</p>
-                <p className="break-all">{selectedFileDisplayPath || "-"}</p>
+                <p className="font-bold text-muted-foreground">File Path</p>
+                <p className="text-sm text-muted-foreground break-all">{selectedFileDisplayPath || "-"}</p>
               </div>
-            </div>
-
-            <div>
-              <p className="mb-2 text-xs font-medium text-muted-foreground">Media</p>
-              {selectedPreviewMedia.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No media detected.</p>
-              ) : (
-                <ul className="space-y-2">
-                  {selectedPreviewMedia.map((item, idx) => (
-                    <li
-                      key={`${item.reference}-${idx}`}
-                      className="rounded-md border bg-muted/40 p-2 text-xs"
-                    >
-                      <p className="break-all">{item.reference}</p>
-                      {item.resolved_path ? (
-                        <p className="mt-1 break-all text-muted-foreground">
-                          {item.resolved_path}
-                        </p>
-                      ) : null}
-                      {item.error ? (
-                        <p className="mt-1 text-destructive">{item.error}</p>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            <div className="p4">
-              <p className="mb-2 text-xs font-medium text-muted-foreground">Issues</p>
-              {selectedPreviewIssues.length === 0 ? (
-                <p className="text-sm text-emerald-600">No issues.</p>
-              ) : (
-                <ul className="list-disc space-y-1 pl-5 text-sm text-destructive">
-                  {selectedPreviewIssues.map((issue) => (
-                    <li key={issue}>{issue}</li>
-                  ))}
-                </ul>
-              )}
+              <div>
+                <p className="font-bold text-muted-foreground">Media</p>
+                {selectedPreviewMedia.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No media detected.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {selectedPreviewMedia.map((item, idx) => (
+                      <li
+                        key={`${item.reference}-${idx}`}
+                        className="rounded-md border bg-muted/40 p-2 text-xs"
+                      >
+                        <p className="break-all">{item.reference}</p>
+                        {item.resolved_path ? (
+                          <p className="mt-1 break-all text-muted-foreground">
+                            {item.resolved_path}
+                          </p>
+                        ) : null}
+                        {item.error ? (
+                          <p className="mt-1 text-destructive">{item.error}</p>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div>
+                <p className="font-bold text-muted-foreground">Issues</p>
+                {selectedPreviewIssues.length === 0 ? (
+                  <p className="text-sm text-emerald-600">No issues.</p>
+                ) : (
+                  <ul className="list-disc space-y-1 pl-5 text-sm text-destructive">
+                    {selectedPreviewIssues.map((issue) => (
+                      <li key={issue}>{issue}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </div>
           </>
         ) : (
