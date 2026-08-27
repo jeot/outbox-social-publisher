@@ -288,8 +288,8 @@ pub async fn run() -> ExitCode {
 
     let config = load_config();
     let _ = dotenvy::from_filename_override(&config.paths.env_path);
-    let requires_db = matches!(&cli.command, Commands::Job(_) | Commands::Serve(_));
-    if requires_db {
+    let requires_writable_db = matches!(&cli.command, Commands::Job(_) | Commands::Serve(_));
+    if requires_writable_db {
         if let Err(err) = ensure_db_ready(&config) {
             print_json(&err.to_output(), config.pretty_json);
             return ExitCode::from(err.exit_code());
@@ -326,6 +326,9 @@ pub async fn run() -> ExitCode {
             JobCommand::List(args) => job_list(args, &config),
             JobCommand::Show(args) => job_show(args, &config),
             JobCommand::RunDebug(args) => job_run_debug(args, &config),
+        },
+        Commands::Worker(worker) => match worker.command {
+            WorkerCommand::Run(args) => worker_run_dry_once(args, &config),
         },
         Commands::Auth(auth) => match auth.platform {
             AuthPlatform::Linkedin(args) => match args.command {
@@ -1507,6 +1510,94 @@ fn job_run_debug(args: JobRunDebugArgs, config: &RuntimeConfig) -> Result<Value,
             "error": err.to_output()
         })),
     }
+}
+
+fn worker_run_dry_once(args: WorkerRunArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
+    if !args.dry_run || !args.once {
+        return Err(AppError::Validation {
+            message: "Only `publo worker run --dry-run --once` is available currently.".to_string(),
+            suggestion: Some(
+                "Use both required flags. Live worker publishing is not implemented yet.".to_string(),
+            ),
+            command: Some("publo worker run --dry-run --once".to_string()),
+        });
+    }
+    if !config.db_path.exists() {
+        return Err(AppError::Validation {
+            message: format!(
+                "Worker database does not exist: {}",
+                config.db_path.display()
+            ),
+            suggestion: Some(
+                "Start Publo once or create scheduled jobs before running the dry worker."
+                    .to_string(),
+            ),
+            command: None,
+        });
+    }
+
+    let now = now_rfc3339_utc();
+    let mut conn = open_db(config)?;
+    let due_jobs: Vec<JobRow> = sql_query(
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+         FROM jobs
+         WHERE status = 'scheduled'
+           AND run_at_utc IS NOT NULL
+           AND run_at_utc <= ?
+           AND workspace_id = ?
+           AND deleted_at IS NULL
+         ORDER BY run_at_utc ASC, created_at ASC",
+    )
+    .bind::<Text, _>(&now)
+    .bind::<Text, _>(&config.paths.workspace_id)
+    .load(&mut conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to list due scheduled jobs: {err}"),
+    })?;
+
+    let mut publishable_count = 0usize;
+    let mut blocked_count = 0usize;
+    let items: Vec<Value> = due_jobs
+        .iter()
+        .map(|job| match preflight_job(job, config) {
+            Ok(preflight) => {
+                publishable_count += 1;
+                json!({
+                    "job_id": job.id,
+                    "platform": job.platform,
+                    "file_path": job.file_path,
+                    "run_at_utc": job.run_at_utc,
+                    "would_publish": true,
+                    "preflight": preflight.details
+                })
+            }
+            Err(err) => {
+                blocked_count += 1;
+                json!({
+                    "job_id": job.id,
+                    "platform": job.platform,
+                    "file_path": job.file_path,
+                    "run_at_utc": job.run_at_utc,
+                    "would_publish": false,
+                    "error": err.to_output()
+                })
+            }
+        })
+        .collect();
+
+    Ok(json!({
+        "ok": true,
+        "mode": "worker_dry_run",
+        "once": true,
+        "live": false,
+        "db_changed": false,
+        "now_utc": now,
+        "workspace_id": config.paths.workspace_id,
+        "due_count": items.len(),
+        "publishable_count": publishable_count,
+        "blocked_count": blocked_count,
+        "items": items
+    }))
 }
 
 fn get_job_by_id(conn: &mut SqliteConnection, id: &str) -> Result<JobRow, AppError> {

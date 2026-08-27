@@ -15,6 +15,7 @@ pub(crate) enum Commands {
     Publish(PublishArgs),
     Auth(AuthArgs),
     Job(JobArgs),
+    Worker(WorkerArgs),
     Init(InitArgs),
     Workspace(WorkspaceArgs),
     Paths,
@@ -124,6 +125,25 @@ pub(crate) enum AuthPlatform {
 pub(crate) struct JobArgs {
     #[command(subcommand)]
     pub(crate) command: JobCommand,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkerArgs {
+    #[command(subcommand)]
+    pub(crate) command: WorkerCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkerCommand {
+    Run(WorkerRunArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkerRunArgs {
+    #[arg(long, required = true)]
+    pub(crate) dry_run: bool,
+    #[arg(long, required = true)]
+    pub(crate) once: bool,
 }
 
 #[derive(Debug, Subcommand)]

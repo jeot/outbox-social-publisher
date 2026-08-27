@@ -25,6 +25,8 @@ Use this playbook when an AI agent operates Publo from terminal.
   - `publo job show --id <job_id>`
 - Preflight/debug a job:
   - `publo job run-debug --id <job_id>`
+- Inspect due scheduled jobs without publishing or changing records:
+  - `publo worker run --dry-run --once`
 - Schedule a job by id:
   - `publo job schedule --id <job_id> --platform linkedin --at 2026-08-26T09:00:00+03:30 --timezone Asia/Tehran --by ai --ai-model gpt-5 --ai-note "schedule decision"`
 - Schedule directly from file (upsert by file identity + platform):

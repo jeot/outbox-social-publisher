@@ -81,6 +81,16 @@ publo publish linkedin --file ./post.md --pass <publish-pass>
 publo publish x --file ./post.md --pass <publish-pass>
 ```
 
+## Safe worker dry run
+
+Inspect every due scheduled job without changing the database or sending a post:
+
+```bash
+publo worker run --dry-run --once
+```
+
+The current worker supports only this safe mode. It reads due jobs, runs local file/media/auth preflight checks, and returns per-job JSON showing whether each item would publish. Live worker publishing is not implemented yet.
+
 ## Recommended local workflow (Obsidian-friendly)
 
 - Keep your content in local markdown files.

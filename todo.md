@@ -117,13 +117,13 @@ Add a minimal local GUI to validate the real scheduling workflow before implemen
 
 Implement scheduled execution and attempt tracking on top of existing job lifecycle.
 
+- [x] Add one-shot dry-run worker (`publo worker run --dry-run --once`) that reads and preflights due jobs without state changes or network publishing.
 - [ ] Add `publo worker run` long-running process for due jobs.
 - [ ] Add atomic claim flow (`scheduled` -> `publishing`) to avoid duplicate execution.
 - [ ] Execute publish via existing platform adapters.
 - [ ] Write `publish_attempts` rows for every attempt.
 - [ ] Update job status (`published`/`failed`) with reason/error snapshots.
 - [ ] Add retry policy with capped attempts and backoff.
-- [ ] Add dry-run mode for worker verification without posting.
 - [ ] Extend audit logging coverage to scheduled worker attempts and retries.
 - [ ] Add OS integration docs for background service mode (`launchd`, `systemd`, Task Scheduler).
 
