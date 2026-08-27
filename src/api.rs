@@ -876,6 +876,27 @@ async fn set_ready_platforms(
         }
     };
 
+    let source = match load_ready_source_job(state.db_path.as_path(), &payload.id) {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            return Json(json!({
+                "ok": false,
+                "error_type": "validation_error",
+                "message": "Decision-queue job not found."
+            }));
+        }
+        Err(message) => return Json(json!({ "ok": false, "message": message })),
+    };
+    for platform in &normalized {
+        if let Some(response) = published_platform_conflict_response(
+            state.db_path.as_path(),
+            &source.asset_id,
+            platform.as_str(),
+        ) {
+            return Json(response);
+        }
+    }
+
     let selected_platforms_json = selected_platforms_json(normalized.as_slice());
     let selected_platforms: Vec<&str> = normalized.iter().map(|platform| platform.as_str()).collect();
     let mut conn = match open_db_by_path(state.db_path.as_path()) {
@@ -930,6 +951,25 @@ async fn job_set_platform(
             }));
         }
     };
+
+    let source = match load_ready_source_job(state.db_path.as_path(), &payload.id) {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            return Json(json!({
+                "ok": false,
+                "error_type": "validation_error",
+                "message": "Decision-queue job not found."
+            }));
+        }
+        Err(message) => return Json(json!({ "ok": false, "message": message })),
+    };
+    if let Some(response) = published_platform_conflict_response(
+        state.db_path.as_path(),
+        &source.asset_id,
+        platform.as_str(),
+    ) {
+        return Json(response);
+    }
 
     let mut conn = match open_db_by_path(state.db_path.as_path()) {
         Ok(conn) => conn,
@@ -1166,6 +1206,15 @@ async fn schedule_multi_job(
             "error_type": "validation_error",
             "message": "Select at least one platform before scheduling."
         }));
+    }
+    for platform in &platforms {
+        if let Some(response) = published_platform_conflict_response(
+            state.db_path.as_path(),
+            &source.asset_id,
+            platform.as_str(),
+        ) {
+            return Json(response);
+        }
     }
     let run_at_utc = match parse_run_at_to_utc(payload.at.as_str()) {
         Ok(value) => value,
@@ -2121,6 +2170,47 @@ fn load_ready_source_job(db_path: &Path, id: &str) -> Result<Option<ReadySourceJ
     .map_err(|err| format!("Failed to read ready source job: {err}"))?;
 
     Ok(rows.pop())
+}
+
+fn published_platform_conflict_response(
+    db_path: &Path,
+    asset_id: &str,
+    platform: &str,
+) -> Option<Value> {
+    let mut conn = match open_db_by_path(db_path) {
+        Ok(conn) => conn,
+        Err(message) => return Some(json!({ "ok": false, "message": message })),
+    };
+    let rows: Result<Vec<RevivableJobRow>, _> = sql_query(
+        "SELECT id, status, asset_id
+         FROM jobs
+         WHERE asset_id = ?
+           AND platform = ?
+           AND status = 'published'
+           AND deleted_at IS NULL
+         LIMIT 1",
+    )
+    .bind::<Text, _>(asset_id)
+    .bind::<Text, _>(platform)
+    .load(&mut conn);
+
+    match rows {
+        Ok(rows) => rows.first().map(|job| {
+            json!({
+                "ok": false,
+                "error_type": "validation_error",
+                "message": format!(
+                    "Cannot schedule {platform}: this asset is already published in job {}.",
+                    job.id
+                )
+            })
+        }),
+        Err(err) => Some(json!({
+            "ok": false,
+            "error_type": "io_error",
+            "message": format!("Failed to check publication history: {err}")
+        })),
+    }
 }
 
 fn sanitize_asset_path(raw: &str) -> Option<PathBuf> {

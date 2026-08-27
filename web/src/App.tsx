@@ -9,11 +9,14 @@ import { RightSidebar } from "@/components/right-sidebar"
 import { ScheduledPage } from "@/components/scheduled-page"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { useScheduledWorkerReminder } from "@/hooks/use-scheduled-worker-reminder"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
 import { Toaster } from "sonner"
 
 function App() {
+  useScheduledWorkerReminder()
+
   const activePage = useUiStore((state) => state.activePage)
   const setActivePage = useUiStore((state) => state.setActivePage)
   const leftSidebarOpen = useUiStore((state) => state.leftSidebarOpen)

@@ -44,6 +44,14 @@ pub(crate) enum AppError {
     },
 }
 
+impl From<diesel::result::Error> for AppError {
+    fn from(error: diesel::result::Error) -> Self {
+        AppError::Io {
+            message: error.to_string(),
+        }
+    }
+}
+
 impl AppError {
     pub(crate) fn exit_code(&self) -> u8 {
         match self {

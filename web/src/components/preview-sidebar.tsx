@@ -1,5 +1,5 @@
 import { PreviewCard } from "@/components/preview-card"
-import { PublishAttemptTimeline } from "@/components/publish-attempt-timeline"
+import { PublicationTimeline } from "@/components/publication-timeline"
 import { fileNameFromPath, tooltipCatalogPath } from "@/lib/catalogPath"
 import { useCatalogStore } from "@/store/catalogStore"
 
@@ -15,6 +15,9 @@ export function PreviewSidebar() {
   const selectedFileLoading = useCatalogStore((state) => state.selectedFileLoading)
   const selectedFileError = useCatalogStore((state) => state.selectedFileError)
   const selectedAttempts = useCatalogStore((state) => state.selectedAttempts)
+  const selectedPublication = useCatalogStore(
+    (state) => state.selectedPublication
+  )
   const rootPaths = roots.map((item) => item.root)
   const selectedFileName = fileNameFromPath(selectedFilePath)
   const selectedFileDisplayPath = selectedFilePath
@@ -23,7 +26,10 @@ export function PreviewSidebar() {
 
   return (
     <div className="h-full min-h-0 overflow-y-auto p-4">
-      <PublishAttemptTimeline attempts={selectedAttempts} />
+      <PublicationTimeline
+        attempts={selectedAttempts}
+        publication={selectedPublication}
+      />
       <PreviewCard
         selectedFilePath={selectedFilePath}
         selectedFileName={selectedFileName}

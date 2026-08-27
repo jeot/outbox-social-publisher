@@ -218,6 +218,8 @@ struct JobRow {
     #[diesel(sql_type = Nullable<Text>)]
     run_at_utc: Option<String>,
     #[diesel(sql_type = Nullable<Text>)]
+    published_at: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
     timezone: Option<String>,
     #[diesel(sql_type = Nullable<Text>)]
     status_reason: Option<String>,
@@ -247,6 +249,18 @@ struct AssetLinkRow {
     asset_id: String,
     #[diesel(sql_type = Text)]
     content_group_id: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct ExistingAssetJobRow {
+    #[diesel(sql_type = Text)]
+    id: String,
+    #[diesel(sql_type = Text)]
+    status: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    platform: Option<String>,
+    #[diesel(sql_type = Text)]
+    selected_platforms: String,
 }
 
 
@@ -331,6 +345,7 @@ pub async fn run() -> ExitCode {
         },
         Commands::Job(job) => match job.command {
             JobCommand::Ready(args) => job_ready(args, &config),
+            JobCommand::ImportPublished(args) => job_import_published(args, &config),
             JobCommand::Unready(args) => job_unready(args, &config),
             JobCommand::Schedule(args) => job_schedule(args, &config),
             JobCommand::Unschedule(args) => job_unschedule(args, &config),
@@ -823,6 +838,22 @@ fn parse_run_at_to_utc(input: &str) -> Result<String, AppError> {
     Ok(dt.with_timezone(&Utc).to_rfc3339())
 }
 
+fn parse_published_at_to_utc(input: &str) -> Result<String, AppError> {
+    let dt = chrono::DateTime::parse_from_rfc3339(input).map_err(|err| {
+        AppError::Validation {
+            message: format!(
+                "Invalid --published-at datetime. Expected RFC3339. Parse error: {err}"
+            ),
+            suggestion: Some(
+                "Use format like 2026-08-21T10:30:00+03:30 or 2026-08-21T07:00:00Z."
+                    .to_string(),
+            ),
+            command: None,
+        }
+    })?;
+    Ok(dt.with_timezone(&Utc).to_rfc3339())
+}
+
 fn validate_operator_notes(
     operator: OperatorArg,
     ai_note: &Option<String>,
@@ -836,6 +867,97 @@ fn validate_operator_notes(
         });
     }
     Ok(())
+}
+
+fn validate_import_operator_notes(
+    operator: OperatorArg,
+    user_note: &Option<String>,
+    ai_note: &Option<String>,
+    ai_model: &Option<String>,
+) -> Result<(), AppError> {
+    validate_operator_notes(operator, ai_note, ai_model)?;
+
+    match operator {
+        OperatorArg::User => {
+            if user_note.as_deref().is_none_or(|note| note.trim().is_empty()) {
+                return Err(AppError::Validation {
+                    message: "--user-note is required with --by user.".to_string(),
+                    suggestion: Some(
+                        "Record how you verified the historical publication.".to_string(),
+                    ),
+                    command: None,
+                });
+            }
+        }
+        OperatorArg::Ai => {
+            if user_note.is_some() {
+                return Err(AppError::Validation {
+                    message: "--user-note cannot be used with --by ai.".to_string(),
+                    suggestion: Some("Use --ai-note for AI attribution.".to_string()),
+                    command: None,
+                });
+            }
+            if ai_note.as_deref().is_none_or(|note| note.trim().is_empty()) {
+                return Err(AppError::Validation {
+                    message: "--ai-note is required with --by ai.".to_string(),
+                    suggestion: Some(
+                        "Record how the historical publication was verified.".to_string(),
+                    ),
+                    command: None,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn canonical_catalog_markdown(
+    file: &PathBuf,
+    config: &RuntimeConfig,
+) -> Result<PathBuf, AppError> {
+    if !file.is_absolute() {
+        return Err(AppError::Validation {
+            message: "--file must be an absolute path.".to_string(),
+            suggestion: Some("Pass a markdown file from a configured catalog root.".to_string()),
+            command: None,
+        });
+    }
+
+    let canonical = fs::canonicalize(file).map_err(|err| AppError::Validation {
+        message: format!("Cannot import missing or unreadable file {}: {err}", file.display()),
+        suggestion: Some("Verify the file path and try again.".to_string()),
+        command: None,
+    })?;
+    let is_markdown = canonical
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+    if !is_markdown {
+        return Err(AppError::Validation {
+            message: "Only markdown catalog files can be imported as published.".to_string(),
+            suggestion: None,
+            command: None,
+        });
+    }
+
+    let within_catalog = config.catalog_roots.iter().any(|root| {
+        root.canonicalize()
+            .map(|canonical_root| canonical.starts_with(canonical_root))
+            .unwrap_or(false)
+    });
+    if !within_catalog {
+        return Err(AppError::Validation {
+            message: format!(
+                "File is outside the configured catalog roots: {}",
+                canonical.display()
+            ),
+            suggestion: Some("Import a file that is visible in the Publo catalog.".to_string()),
+            command: None,
+        });
+    }
+
+    Ok(canonical)
 }
 
 fn selected_platforms_json(platforms: &[PlatformArg]) -> String {
@@ -928,6 +1050,215 @@ fn find_job_id_by_asset_platform(
     Ok(rows.pop().map(|row| row.id))
 }
 
+fn existing_asset_jobs(
+    conn: &mut SqliteConnection,
+    asset_id: &str,
+) -> Result<Vec<ExistingAssetJobRow>, AppError> {
+    sql_query(
+        "SELECT id, status, platform, selected_platforms
+         FROM jobs
+         WHERE asset_id = ? AND deleted_at IS NULL
+         ORDER BY created_at ASC",
+    )
+    .bind::<Text, _>(asset_id)
+    .load(conn)
+    .map_err(|err| AppError::Io {
+        message: format!("Failed to inspect existing jobs before import: {err}"),
+    })
+}
+
+fn ensure_asset_platform_not_published(
+    conn: &mut SqliteConnection,
+    asset_id: &str,
+    platform: &str,
+) -> Result<(), AppError> {
+    if let Some(job) = existing_asset_jobs(conn, asset_id)?.into_iter().find(|job| {
+        job.status == "published" && job.platform.as_deref() == Some(platform)
+    }) {
+        return Err(AppError::Validation {
+            message: format!(
+                "Cannot schedule {platform}: this asset is already published in job {}.",
+                job.id
+            ),
+            suggestion: Some(
+                "Use a new file for an intentional repost during the supervised pilot."
+                    .to_string(),
+            ),
+            command: None,
+        });
+    }
+
+    Ok(())
+}
+
+fn job_import_published(
+    args: JobImportPublishedArgs,
+    config: &RuntimeConfig,
+) -> Result<Value, AppError> {
+    validate_import_operator_notes(
+        args.by,
+        &args.user_note,
+        &args.ai_note,
+        &args.ai_model,
+    )?;
+
+    let mut platforms = Vec::new();
+    for platform in args.platform {
+        if !platforms.contains(&platform) {
+            platforms.push(platform);
+        }
+    }
+    if platforms.is_empty() {
+        return Err(AppError::Validation {
+            message: "At least one --platform is required.".to_string(),
+            suggestion: Some("Use --platform linkedin,x.".to_string()),
+            command: None,
+        });
+    }
+
+    let file_path = canonical_catalog_markdown(&args.file, config)?;
+    let file_path_str = file_path.display().to_string();
+    let requested_path_str = args.file.display().to_string();
+    let file_raw = fs::read_to_string(&file_path).map_err(|err| AppError::Io {
+        message: format!("Failed to read historical publication file: {err}"),
+    })?;
+    let publish_text = publish::extract_publish_text(&file_raw);
+    let file_sha256 = compute_content_sha256(file_raw.as_bytes());
+    let text_sha256 = compute_content_sha256(publish_text.as_bytes());
+    let published_at = args
+        .published_at
+        .as_deref()
+        .map(parse_published_at_to_utc)
+        .transpose()?;
+
+    if args.timezone.as_deref().is_some_and(|value| value.trim().is_empty()) {
+        return Err(AppError::Validation {
+            message: "--timezone cannot be empty.".to_string(),
+            suggestion: Some("Use an IANA timezone such as Asia/Tehran.".to_string()),
+            command: None,
+        });
+    }
+
+    let mut conn = open_db(config)?;
+    let action_group_id = generate_id();
+    let now = now_rfc3339_utc();
+    let workspace_id = config.workspace_id.clone();
+    let (imported, asset_id, content_group_id) = conn
+        .immediate_transaction::<_, AppError, _>(|conn| {
+            let existing_link =
+                resolve_asset_link_for_paths(conn, &file_path_str, &requested_path_str)?;
+            let asset_id = existing_link
+                .as_ref()
+                .map(|row| row.asset_id.clone())
+                .unwrap_or_else(generate_id);
+            let content_group_id = existing_link
+                .as_ref()
+                .map(|row| row.content_group_id.clone())
+                .unwrap_or_else(generate_id);
+            let existing_jobs = existing_asset_jobs(conn, &asset_id)?;
+
+            for platform in &platforms {
+                let platform_name = platform.as_str();
+                if let Some(conflict) = existing_jobs.iter().find(|job| {
+                    job.platform.as_deref() == Some(platform_name)
+                        || (job.platform.is_none()
+                            && selected_platforms_from_json(&job.selected_platforms)
+                                .iter()
+                                .any(|selected| selected == platform_name))
+                }) {
+                    return Err(AppError::Validation {
+                        message: format!(
+                            "Cannot import {platform_name}: existing job {} is {} and already uses this asset/platform.",
+                            conflict.id, conflict.status
+                        ),
+                        suggestion: Some(
+                            "Historical import is insert-only; resolve or remove the existing decision first."
+                                .to_string(),
+                        ),
+                        command: None,
+                    });
+                }
+            }
+
+            let mut inserted = Vec::with_capacity(platforms.len());
+            for platform in &platforms {
+                let id = generate_id();
+                let platform_name = platform.as_str();
+                let selected_platforms = selected_platforms_json(&[*platform]);
+                sql_query(
+                    "INSERT INTO jobs (
+                        id, action_group_id, content_group_id, asset_id, kind, status,
+                        platform, publish_mode, workspace_id, operator, user_note, ai_note,
+                        ai_model, selected_platforms, file_path, run_at_utc, timezone,
+                        status_reason, attempt_count, published_at, file_sha256, text_sha256,
+                        fingerprint, created_at, updated_at, deleted_at, version, synced_at,
+                        modified_by
+                     ) VALUES (
+                        ?, ?, ?, ?, 'catalog', 'published',
+                        ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, NULL, ?,
+                        'Imported historical publication', 0, ?, ?, ?,
+                        NULL, ?, ?, NULL, 1, NULL,
+                        'local'
+                     )",
+                )
+                .bind::<Text, _>(&id)
+                .bind::<Text, _>(&action_group_id)
+                .bind::<Text, _>(&content_group_id)
+                .bind::<Text, _>(&asset_id)
+                .bind::<Text, _>(platform_name)
+                .bind::<Nullable<Text>, _>(publish_mode_for_platform(*platform))
+                .bind::<Text, _>(&workspace_id)
+                .bind::<Text, _>(args.by.as_str())
+                .bind::<Nullable<Text>, _>(args.user_note.as_deref())
+                .bind::<Nullable<Text>, _>(args.ai_note.as_deref())
+                .bind::<Nullable<Text>, _>(args.ai_model.as_deref())
+                .bind::<Text, _>(&selected_platforms)
+                .bind::<Text, _>(&file_path_str)
+                .bind::<Nullable<Text>, _>(args.timezone.as_deref())
+                .bind::<Nullable<Text>, _>(published_at.as_deref())
+                .bind::<Text, _>(&file_sha256)
+                .bind::<Text, _>(&text_sha256)
+                .bind::<Text, _>(&now)
+                .bind::<Text, _>(&now)
+                .execute(conn)?;
+                inserted.push((id, platform_name.to_string()));
+            }
+            Ok((inserted, asset_id, content_group_id))
+        })
+        .map_err(|err| match err {
+            validation @ AppError::Validation { .. } => validation,
+            AppError::Io { message } => AppError::Io {
+                message: format!(
+                    "Failed to import historical publications; no records were inserted: {message}"
+                ),
+            },
+            other => other,
+        })?;
+
+    Ok(json!({
+        "ok": true,
+        "mode": "job_import_published",
+        "created": imported.len(),
+        "items": imported
+            .into_iter()
+            .map(|(id, platform)| json!({ "job_id": id, "platform": platform }))
+            .collect::<Vec<_>>(),
+        "action_group_id": action_group_id,
+        "content_group_id": content_group_id,
+        "asset_id": asset_id,
+        "status": "published",
+        "published_at": published_at,
+        "timezone": args.timezone,
+        "operator": args.by.as_str(),
+        "file_path": file_path_str,
+        "file_sha256": file_sha256,
+        "text_sha256": text_sha256,
+        "attempt_count": 0,
+        "origin": "historical_import"
+    }))
+}
+
 fn job_ready(args: JobReadyArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     validate_operator_notes(args.by, &args.ai_note, &args.ai_model)?;
     let mut selected_platforms: Vec<PlatformArg> = Vec::new();
@@ -964,6 +1295,10 @@ fn job_ready(args: JobReadyArgs, config: &RuntimeConfig) -> Result<Value, AppErr
         .as_ref()
         .map(|row| row.content_group_id.clone())
         .unwrap_or_else(generate_id);
+
+    for platform in &selected_platforms {
+        ensure_asset_platform_not_published(&mut conn, &asset_id, platform.as_str())?;
+    }
 
     let mut created = false;
     let job_id = if let Some(existing_ready_id) = find_ready_intent_id_for_asset(&mut conn, &asset_id)? {
@@ -1138,6 +1473,12 @@ pub(crate) fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Res
         _ => None,
     };
 
+    ensure_asset_platform_not_published(
+        &mut conn,
+        &job.asset_id,
+        job.platform.as_deref().unwrap_or_default(),
+    )?;
+
     match preflight_job(&job, config) {
         Ok(preflight) => {
             let now = now_rfc3339_utc();
@@ -1272,6 +1613,21 @@ pub(crate) fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig)
     let platform = args.platform.as_str();
     let workspace_id = config.workspace_id.clone();
     let selected_platforms_json = selected_platforms_json(&[args.platform]);
+    let file_path_str = file_path.display().to_string();
+    let requested_path_str = args.file.display().to_string();
+
+    {
+        let mut conn = open_db(config)?;
+        if let Some(existing_link) =
+            resolve_asset_link_for_paths(&mut conn, &file_path_str, &requested_path_str)?
+        {
+            ensure_asset_platform_not_published(
+                &mut conn,
+                &existing_link.asset_id,
+                platform,
+            )?;
+        }
+    }
 
     let preflight_input = JobRow {
         id: String::new(),
@@ -1292,6 +1648,7 @@ pub(crate) fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig)
         selected_platforms: selected_platforms_json.clone(),
         file_path: file_path.display().to_string(),
         run_at_utc: None,
+        published_at: None,
         timezone: None,
         status_reason: None,
         attempt_count: 0,
@@ -1307,8 +1664,6 @@ pub(crate) fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig)
             let mut conn = open_db(config)?;
             let now = now_rfc3339_utc();
             let action_group_id = generate_id();
-            let file_path_str = file_path.display().to_string();
-            let requested_path_str = args.file.display().to_string();
             let existing_link =
                 resolve_asset_link_for_paths(&mut conn, &file_path_str, &requested_path_str)?;
             let asset_id = existing_link
@@ -1319,6 +1674,8 @@ pub(crate) fn job_add_schedule(args: JobAddScheduleArgs, config: &RuntimeConfig)
                 .as_ref()
                 .map(|row| row.content_group_id.clone())
                 .unwrap_or_else(generate_id);
+
+            ensure_asset_platform_not_published(&mut conn, &asset_id, platform)?;
 
             let changed = sql_query(
                 "UPDATE jobs
@@ -1501,7 +1858,7 @@ fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError
     let mut conn = open_db(config)?;
     let rows: Vec<JobRow> = match (args.status.as_ref(), args.platform) {
         (Some(status), Some(platform)) => sql_query(
-            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              WHERE status = ? AND platform = ?
              ORDER BY COALESCE(run_at_utc, created_at) ASC
@@ -1512,7 +1869,7 @@ fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError
         .bind::<Integer, _>(args.limit as i32)
         .load(&mut conn),
         (Some(status), None) => sql_query(
-            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              WHERE status = ?
              ORDER BY COALESCE(run_at_utc, created_at) ASC
@@ -1522,7 +1879,7 @@ fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError
         .bind::<Integer, _>(args.limit as i32)
         .load(&mut conn),
         (None, Some(platform)) => sql_query(
-            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              WHERE platform = ?
              ORDER BY COALESCE(run_at_utc, created_at) ASC
@@ -1532,7 +1889,7 @@ fn job_list(args: JobListArgs, config: &RuntimeConfig) -> Result<Value, AppError
         .bind::<Integer, _>(args.limit as i32)
         .load(&mut conn),
         (None, None) => sql_query(
-            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs
              ORDER BY COALESCE(run_at_utc, created_at) ASC
              LIMIT ?",
@@ -1605,7 +1962,7 @@ fn worker_run_dry_once(args: WorkerRunArgs, config: &RuntimeConfig) -> Result<Va
     let mut conn = open_db(config)?;
     let interrupted = find_expired_worker_claims(&mut conn, &now)?;
     let due_jobs: Vec<JobRow> = sql_query(
-        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
          FROM jobs
          WHERE status = 'scheduled'
            AND run_at_utc IS NOT NULL
@@ -2008,7 +2365,7 @@ fn claim_due_job(
         }
 
         let job = sql_query(
-            "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
              FROM jobs WHERE id = ? LIMIT 1",
         )
         .bind::<Text, _>(job_id)
@@ -2175,7 +2532,7 @@ fn execute_claimed_job(
 
 fn get_job_by_id(conn: &mut SqliteConnection, id: &str) -> Result<JobRow, AppError> {
     let mut rows: Vec<JobRow> = sql_query(
-        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
+        "SELECT id,action_group_id,content_group_id,asset_id,kind,status,platform,publish_mode,workspace_id,owner_user_id,operator,user_note,ai_note,ai_model,tags,selected_platforms,file_path,run_at_utc,published_at,timezone,status_reason,attempt_count,file_sha256,text_sha256,fingerprint,created_at,updated_at
          FROM jobs
          WHERE id = ?
          LIMIT 1",
@@ -2240,6 +2597,7 @@ pub(crate) fn job_preflight_for_file_platform(
         selected_platforms: "[]".to_string(),
         file_path: file_path.display().to_string(),
         run_at_utc: None,
+        published_at: None,
         timezone: None,
         status_reason: None,
         attempt_count: 0,
@@ -2353,6 +2711,17 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
 }
 
 fn job_to_json(job: &JobRow) -> Value {
+    let origin = if job.status == "published"
+        && job.attempt_count == 0
+        && job.status_reason.as_deref() == Some("Imported historical publication")
+    {
+        Some("historical_import")
+    } else if job.status == "published" {
+        Some("worker")
+    } else {
+        None
+    };
+
     json!({
         "id": job.id,
         "action_group_id": job.action_group_id,
@@ -2372,6 +2741,7 @@ fn job_to_json(job: &JobRow) -> Value {
         "selected_platforms": selected_platforms_from_json(&job.selected_platforms),
         "file_path": job.file_path,
         "run_at_utc": job.run_at_utc,
+        "published_at": job.published_at,
         "timezone": job.timezone,
         "status_reason": job.status_reason,
         "attempt_count": job.attempt_count,
@@ -2379,7 +2749,8 @@ fn job_to_json(job: &JobRow) -> Value {
         "text_sha256": job.text_sha256,
         "fingerprint": job.fingerprint,
         "created_at": job.created_at,
-        "updated_at": job.updated_at
+        "updated_at": job.updated_at,
+        "origin": origin
     })
 }
 
@@ -4887,6 +5258,62 @@ mod worker_tests {
         post_id: Option<String>,
     }
 
+    #[derive(Debug, QueryableByName)]
+    struct TestImportedJobRow {
+        #[diesel(sql_type = Text)]
+        id: String,
+        #[diesel(sql_type = Text)]
+        action_group_id: String,
+        #[diesel(sql_type = Text)]
+        content_group_id: String,
+        #[diesel(sql_type = Text)]
+        asset_id: String,
+        #[diesel(sql_type = Text)]
+        status: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        platform: Option<String>,
+        #[diesel(sql_type = Text)]
+        operator: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        user_note: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        ai_note: Option<String>,
+        #[diesel(sql_type = Text)]
+        selected_platforms: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        published_at: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        timezone: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        status_reason: Option<String>,
+        #[diesel(sql_type = Integer)]
+        attempt_count: i32,
+        #[diesel(sql_type = Nullable<Text>)]
+        file_sha256: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        text_sha256: Option<String>,
+    }
+
+    fn jobs_for_file(
+        workspace: &TestWorkspace,
+        file_path: &PathBuf,
+    ) -> Vec<TestImportedJobRow> {
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let canonical = fs::canonicalize(file_path).expect("canonical test file");
+        sql_query(
+            "SELECT id, action_group_id, content_group_id, asset_id, status, platform,
+                    operator, user_note, ai_note, selected_platforms, published_at,
+                    timezone, status_reason, attempt_count, file_sha256, text_sha256
+             FROM jobs
+             WHERE (file_path = ? OR file_path = ?) AND deleted_at IS NULL
+             ORDER BY platform ASC",
+        )
+        .bind::<Text, _>(canonical.display().to_string())
+        .bind::<Text, _>(file_path.display().to_string())
+        .load(&mut conn)
+        .expect("read jobs for file")
+    }
+
     enum FakePublishOutcome {
         Success,
         Failure,
@@ -5126,6 +5553,235 @@ mod worker_tests {
         assert_eq!(saved.status, "scheduled");
         assert_eq!(saved.attempt_count, 0);
         assert!(attempt_rows(&mut conn, &job_id).is_empty());
+    }
+
+    #[test]
+    fn import_published_creates_attributed_jobs_without_attempts() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "historical.md");
+
+        let output = job_import_published(
+            JobImportPublishedArgs {
+                platform: vec![PlatformArg::Linkedin, PlatformArg::X],
+                file: file.clone(),
+                published_at: Some("2026-08-20T10:30:00+03:30".to_string()),
+                timezone: Some("Asia/Tehran".to_string()),
+                by: OperatorArg::User,
+                user_note: Some("Published before Publo".to_string()),
+                ai_note: None,
+                ai_model: None,
+            },
+            &workspace.config,
+        )
+        .expect("import historical publication");
+
+        assert_eq!(output["created"].as_u64(), Some(2));
+        assert_eq!(output["origin"].as_str(), Some("historical_import"));
+        let listed = job_list(
+            JobListArgs {
+                status: Some("published".to_string()),
+                platform: None,
+                limit: 10,
+            },
+            &workspace.config,
+        )
+        .expect("list imported publications");
+        assert_eq!(listed["items"][0]["origin"], "historical_import");
+        assert_eq!(
+            listed["items"][0]["published_at"],
+            "2026-08-20T07:00:00+00:00"
+        );
+        let rows = jobs_for_file(&workspace, &file);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].action_group_id, rows[1].action_group_id);
+        assert_eq!(rows[0].content_group_id, rows[1].content_group_id);
+        assert_eq!(rows[0].asset_id, rows[1].asset_id);
+
+        let mut conn = open_db(&workspace.config).expect("open database");
+        for row in rows {
+            assert_eq!(row.status, "published");
+            assert_eq!(row.operator, "user");
+            assert_eq!(row.user_note.as_deref(), Some("Published before Publo"));
+            assert!(row.ai_note.is_none());
+            assert_eq!(row.published_at.as_deref(), Some("2026-08-20T07:00:00+00:00"));
+            assert_eq!(row.timezone.as_deref(), Some("Asia/Tehran"));
+            assert_eq!(
+                row.status_reason.as_deref(),
+                Some("Imported historical publication")
+            );
+            assert_eq!(row.attempt_count, 0);
+            assert!(row.file_sha256.is_some());
+            assert!(row.text_sha256.is_some());
+            assert_eq!(
+                selected_platforms_from_json(&row.selected_platforms),
+                vec![row.platform.clone().expect("platform")]
+            );
+            assert!(attempt_rows(&mut conn, &row.id).is_empty());
+        }
+    }
+
+    #[test]
+    fn import_published_cli_requires_explicit_operator() {
+        let valid = Cli::try_parse_from([
+            "publo",
+            "job",
+            "import-published",
+            "--file",
+            "/tmp/post.md",
+            "--platform",
+            "linkedin,x",
+            "--by",
+            "ai",
+            "--ai-note",
+            "Verified by user-provided history",
+        ])
+        .expect("parse historical import command");
+
+        match valid.command {
+            Commands::Job(JobArgs {
+                command: JobCommand::ImportPublished(args),
+            }) => {
+                assert_eq!(args.platform.len(), 2);
+                assert!(matches!(args.by, OperatorArg::Ai));
+            }
+            _ => panic!("expected import-published command"),
+        }
+
+        let missing_operator = Cli::try_parse_from([
+            "publo",
+            "job",
+            "import-published",
+            "--file",
+            "/tmp/post.md",
+            "--platform",
+            "linkedin",
+            "--user-note",
+            "Previously published",
+        ]);
+        assert!(missing_operator.is_err());
+    }
+
+    #[test]
+    fn import_published_rejects_conflicts_without_partial_inserts() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "conflict.md");
+        insert_due_job(&workspace, &file);
+
+        let result = job_import_published(
+            JobImportPublishedArgs {
+                platform: vec![PlatformArg::X, PlatformArg::Linkedin],
+                file: file.clone(),
+                published_at: None,
+                timezone: None,
+                by: OperatorArg::Ai,
+                user_note: None,
+                ai_note: Some("Confirmed by the user".to_string()),
+                ai_model: Some("test-model".to_string()),
+            },
+            &workspace.config,
+        );
+
+        assert!(matches!(result, Err(AppError::Validation { .. })));
+        let rows = jobs_for_file(&workspace, &file);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "scheduled");
+        assert_eq!(rows[0].platform.as_deref(), Some("linkedin"));
+    }
+
+    #[test]
+    fn import_published_rejects_selected_ready_platform() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "ready-conflict.md");
+        job_ready(
+            JobReadyArgs {
+                platform: vec![PlatformArg::Linkedin],
+                file: file.clone(),
+                at: None,
+                timezone: None,
+                owner_user_id: None,
+                by: OperatorArg::User,
+                user_note: None,
+                ai_note: None,
+                ai_model: None,
+            },
+            &workspace.config,
+        )
+        .expect("create ready decision");
+
+        let result = job_import_published(
+            JobImportPublishedArgs {
+                platform: vec![PlatformArg::Linkedin],
+                file: file.clone(),
+                published_at: None,
+                timezone: None,
+                by: OperatorArg::User,
+                user_note: Some("Previously published".to_string()),
+                ai_note: None,
+                ai_model: None,
+            },
+            &workspace.config,
+        );
+
+        assert!(matches!(result, Err(AppError::Validation { .. })));
+        assert_eq!(jobs_for_file(&workspace, &file).len(), 1);
+    }
+
+    #[test]
+    fn ready_rejects_platform_with_imported_publication() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "published-conflict.md");
+        job_import_published(
+            JobImportPublishedArgs {
+                platform: vec![PlatformArg::Linkedin],
+                file: file.clone(),
+                published_at: None,
+                timezone: None,
+                by: OperatorArg::User,
+                user_note: Some("Previously published".to_string()),
+                ai_note: None,
+                ai_model: None,
+            },
+            &workspace.config,
+        )
+        .expect("import historical publication");
+
+        let result = job_ready(
+            JobReadyArgs {
+                platform: vec![PlatformArg::Linkedin],
+                file: file.clone(),
+                at: None,
+                timezone: None,
+                owner_user_id: None,
+                by: OperatorArg::User,
+                user_note: None,
+                ai_note: None,
+                ai_model: None,
+            },
+            &workspace.config,
+        );
+
+        assert!(matches!(result, Err(AppError::Validation { .. })));
+        assert_eq!(jobs_for_file(&workspace, &file).len(), 1);
+
+        let direct_schedule = job_add_schedule(
+            JobAddScheduleArgs {
+                platform: PlatformArg::Linkedin,
+                file: file.clone(),
+                at: "2026-09-01T10:00:00+03:30".to_string(),
+                timezone: Some("Asia/Tehran".to_string()),
+                owner_user_id: None,
+                by: OperatorArg::User,
+                user_note: None,
+                ai_note: None,
+                ai_model: None,
+            },
+            &workspace.config,
+        );
+        assert!(matches!(
+            direct_schedule,
+            Err(AppError::Validation { .. })
+        ));
+        assert_eq!(jobs_for_file(&workspace, &file).len(), 1);
     }
 
     #[test]

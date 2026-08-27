@@ -9,6 +9,9 @@ export type JobItem = {
   timezone: string | null
   status_reason: string | null
   operator: string | null
+  user_note: string | null
+  ai_note: string | null
+  attempt_count: number
   updated_at: string
 }
 

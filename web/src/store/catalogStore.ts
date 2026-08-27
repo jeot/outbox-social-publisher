@@ -38,6 +38,13 @@ export type PublishAttempt = {
   post_url: string | null
 }
 
+export type PublicationContext = {
+  imported: boolean
+  publishedAt: string | null
+  operator: string | null
+  note: string | null
+}
+
 type CatalogState = {
   roots: CatalogRoot[]
   readyByPath: Record<string, string | null>
@@ -60,7 +67,9 @@ type CatalogState = {
   selectedFileLoading: boolean
   selectedFileError: string | null
   selectedAttempts: PublishAttempt[]
+  selectedPublication: PublicationContext | null
   setSelectedAttempts: (attempts: PublishAttempt[]) => void
+  setSelectedPublication: (publication: PublicationContext | null) => void
   loadCatalog: () => Promise<void>
   selectFile: (path: string) => Promise<void>
   clearSelectedFile: () => void
@@ -95,7 +104,10 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
   selectedFileLoading: false,
   selectedFileError: null,
   selectedAttempts: [],
+  selectedPublication: null,
   setSelectedAttempts: (attempts) => set({ selectedAttempts: attempts }),
+  setSelectedPublication: (publication) =>
+    set({ selectedPublication: publication }),
   loadCatalog: async () => {
     set({ loading: true, error: null })
     try {
@@ -161,6 +173,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedFileLoading: true,
       selectedFileError: null,
       selectedAttempts: [],
+      selectedPublication: null,
       selectedFileContent: "",
       selectedPublishText: "",
       selectedPreviewMedia: [],
@@ -259,6 +272,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedFileLoading: false,
       selectedFileError: null,
       selectedAttempts: [],
+      selectedPublication: null,
     })
     clearLastSelectedFilePath()
   },

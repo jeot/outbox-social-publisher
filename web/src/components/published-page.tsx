@@ -26,6 +26,9 @@ export function PublishedPage() {
   const loadCatalog = useCatalogStore((state) => state.loadCatalog)
   const revealFileInTree = useCatalogStore((state) => state.revealFileInTree)
   const setSelectedAttempts = useCatalogStore((state) => state.setSelectedAttempts)
+  const setSelectedPublication = useCatalogStore(
+    (state) => state.setSelectedPublication
+  )
   const setActivePage = useUiStore((state) => state.setActivePage)
   const setPreviewPanelOpen = useUiStore((state) => state.setCatalogPanelOpen)
 
@@ -61,7 +64,14 @@ export function PublishedPage() {
     setError(null)
     try {
       await selectFile(job.file_path)
-      setSelectedAttempts(await listJobAttempts(job.id))
+      const attempts = await listJobAttempts(job.id)
+      setSelectedAttempts(attempts)
+      setSelectedPublication({
+        imported: isImportedPublication(job) && attempts.length === 0,
+        publishedAt: job.published_at,
+        operator: job.operator,
+        note: job.ai_note ?? job.user_note,
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to load publish details")
     }
@@ -129,13 +139,20 @@ export function PublishedPage() {
                       <Badge variant="outline" className="w-fit">
                         {job.id.slice(0, 8)}
                       </Badge>
+                      {isImportedPublication(job) ? (
+                        <Badge variant="secondary" className="w-fit">
+                          Imported
+                        </Badge>
+                      ) : null}
                     </div>
                   </TableCell>
                   <TableCell>
                     <Badge variant="secondary">{job.platform ?? "none"}</Badge>
                   </TableCell>
                   <TableCell>
-                    {formatPublishedAt(job.published_at ?? job.updated_at)}
+                    {job.published_at
+                      ? formatPublishedAt(job.published_at)
+                      : "Date unknown"}
                   </TableCell>
                   <TableCell>
                     <div onClick={(event) => event.stopPropagation()}>
@@ -170,6 +187,13 @@ export function PublishedPage() {
 function formatPublishedAt(value: string) {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
+function isImportedPublication(job: JobItem): boolean {
+  return (
+    job.attempt_count === 0 &&
+    job.status_reason === "Imported historical publication"
+  )
 }
 
 function selectedRowClass(selected: boolean): string {

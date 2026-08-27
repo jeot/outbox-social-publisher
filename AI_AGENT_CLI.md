@@ -4,15 +4,42 @@ Use this playbook when an AI agent operates Publo from terminal.
 
 ## Rules
 
+- The configured `publo` CLI command is the only interface for Publo state and writes.
+  Publo's configured workspace database is the source of truth; do not infer state from the
+  current directory. Do not override `HOME`, use an alternate test workspace, inspect or
+  modify the database, or bypass the CLI with filesystem operations.
 - Always use JSON output from `publo` and verify results.
 - For write commands that support it, always pass `--by ai`.
 - Add `--ai-model` and `--ai-note` on AI-written decisions.
 - Verify each write batch with `publo job list`.
+- Do not move or rename short-form content files. File identity tracking for moves and renames is a future Publo capability; create new files when new content is needed.
+- Name new short-form files according to `references/short-form-content-rule.md`: `linkedin-post`, `x-post`, or `x-thread` identifies the intended platform and format. Treat this as a catalog hint only; Publo remains authoritative for the selected platform, schedule, and status.
+- Legacy filenames remain valid. Do not rename them merely to match the new convention.
+- The only author-change signal currently available is Publo's last-modified-by flag (`ai` or `user`); do not describe it as a full audit history.
+- Store and reason about publish times through Publo. The database stores UTC; `--timezone` controls dashboard display and human-facing scheduling.
 - Best-effort only: do as much as possible, then report what could not be done and why.
 - Do not try to enforce impossible targets (for example not enough content).
 - File/path checks and duplicate protection are handled by Publo core.
-- Never invoke `publo worker run --live` or a real `publo publish` command. Live publishing
-  requires deliberate human authorization and is outside this content-management playbook.
+
+## Publo State Model
+
+These are the complete job statuses currently supported:
+
+- `ready` = editorially selected (or needs very minor work) and eligible for scheduling
+- `scheduled` = assigned to a platform and publish time
+- `publishing` = publish attempt is in progress
+- `published` = publish completed successfully
+- `failed` = publish attempt completed unsuccessfully
+- `blocked` = Publo rejected the job before scheduling or publishing; inspect its error reason
+- `canceled` = a scheduled job was manually canceled; preserve the cancellation reason
+- `disabled` = Publo disabled the job; inspect its reason before changing it
+
+Lifecycle expectations:
+
+- A ready decision can become `blocked` or `disabled` immediately when Publo validation rejects it.
+- A scheduled job can be manually canceled and later scheduled again if the content remains eligible.
+- A scheduled publish normally moves through `publishing` and then ends as either `published` or `failed`.
+- Publo's status and reason are authoritative. Do not infer publication from filenames, timestamps, or the absence of an error in a separate file.
 
 ## Core Commands
 
@@ -27,8 +54,8 @@ Use this playbook when an AI agent operates Publo from terminal.
   - `publo job show --id <job_id>`
 - Preflight/debug a job:
   - `publo job run-debug --id <job_id>`
-- Inspect due scheduled jobs without publishing or changing records:
-  - `publo worker run --dry-run --once`
+- Import a publication that happened before Publo tracked it:
+  - `publo job import-published --file /abs/path/post.md --platform linkedin,x --published-at 2026-08-20T10:30:00+03:30 --timezone Asia/Tehran --by ai --ai-model gpt-5 --ai-note "how the publication was verified"`
 - Schedule a job by id:
   - `publo job schedule --id <job_id> --platform linkedin --at 2026-08-26T09:00:00+03:30 --timezone Asia/Tehran --by ai --ai-model gpt-5 --ai-note "schedule decision"`
 - Schedule directly from file (upsert by file identity + platform):
@@ -44,6 +71,7 @@ Use this playbook when an AI agent operates Publo from terminal.
 2. For each file, decide:
    - platforms (`linkedin`, `x`, or both),
    - optional suggested publish time (`--at` + `--timezone`).
+   - For newly named assets, use the `linkedin-post`, `x-post`, or `x-thread` filename token as the intended format. Confirm the actual platform through the Publo command rather than inferring job state from the filename.
 3. Run `publo job ready ... --by ai ...` for each file.
 4. Verify:
    - `publo job list --status ready --limit 500`
@@ -92,11 +120,19 @@ Process:
   - report unsupported gap clearly,
   - optionally propose X single-post fallback.
 
-## Optional Debug-First Checks On Raw Files
+## Scenario D: Import Historical Publications
 
-Before `job ready` or scheduling, agent may run publish debug checks without password (debug does not publish):
+Use this only when the user asks to record content that was already published outside
+Publo.
 
-- `publo publish linkedin --file /abs/path/post.md --debug`
-- `publo publish x --file /abs/path/post.md --debug`
+1. Confirm the exact file and platform from user-provided evidence. Do not infer publication
+   from a filename or assume that content was published.
+2. Include `--published-at` and `--timezone` only when the publication time is known.
+3. Always use `--by ai`, `--ai-note`, and `--ai-model`.
+4. Run one insert-only import command for all confirmed platforms.
+5. If Publo reports an existing job conflict, do not modify or remove that job. Report the
+   conflict to the user.
+6. Verify with `publo job list --status published --limit 500` and `publo job show --id ...`.
 
-Use this when you want early feedback on media/text/auth issues before queue actions.
+Historical imports create no provider attempt. They must appear as imported publication
+history rather than as content published by Publo.

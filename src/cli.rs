@@ -153,6 +153,7 @@ pub(crate) struct WorkerRunArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum JobCommand {
     Ready(JobReadyArgs),
+    ImportPublished(JobImportPublishedArgs),
     Unready(JobIdArgs),
     Schedule(JobScheduleArgs),
     Unschedule(JobUnscheduleArgs),
@@ -161,6 +162,26 @@ pub(crate) enum JobCommand {
     List(JobListArgs),
     Show(JobShowArgs),
     RunDebug(JobRunDebugArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct JobImportPublishedArgs {
+    #[arg(long, value_enum, value_delimiter = ',', required = true)]
+    pub(crate) platform: Vec<PlatformArg>,
+    #[arg(long)]
+    pub(crate) file: PathBuf,
+    #[arg(long)]
+    pub(crate) published_at: Option<String>,
+    #[arg(long, requires = "published_at")]
+    pub(crate) timezone: Option<String>,
+    #[arg(long, value_enum, required = true)]
+    pub(crate) by: OperatorArg,
+    #[arg(long)]
+    pub(crate) user_note: Option<String>,
+    #[arg(long)]
+    pub(crate) ai_note: Option<String>,
+    #[arg(long)]
+    pub(crate) ai_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]

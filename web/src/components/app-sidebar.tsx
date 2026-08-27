@@ -8,7 +8,9 @@ import {
   Settings2,
   Sparkles,
   SunMoon,
+  Volume2,
 } from "lucide-react"
+import { toast } from "sonner"
 import { NavUser } from "@/components/nav-user"
 import { TeamSwitcher } from "@/components/team-switcher"
 import {
@@ -23,6 +25,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
+import { playReminderBell } from "@/lib/reminderSound"
 
 export type AppPage = "catalog" | "ready" | "scheduled" | "published"
 
@@ -70,6 +73,16 @@ export function AppSidebar({
     window.localStorage.setItem("publo.theme", next)
   }, [theme])
 
+  const testReminderSound = React.useCallback(async () => {
+    const played = await playReminderBell()
+    if (played) {
+      toast.success("Reminder sound is ready. Keep this Publo tab open.")
+      return
+    }
+
+    toast.error("The browser blocked audio. Check this tab's sound permission.")
+  }, [])
+
   return (
     <Sidebar collapsible="icon" variant="inset" {...props}>
       <SidebarHeader>
@@ -115,6 +128,15 @@ export function AppSidebar({
                 <SidebarMenuButton tooltip="Settings">
                   <Settings2 />
                   <span>Settings</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  tooltip="Test reminder sound"
+                  render={<button type="button" onClick={testReminderSound} />}
+                >
+                  <Volume2 />
+                  <span>Test bell</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
