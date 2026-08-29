@@ -1,4 +1,12 @@
 import { cn } from "@/lib/utils"
+import { useState } from "react"
+import { Button } from "./ui/button"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "./ui/tooltip"
+import { FolderOpenIcon } from "lucide-react"
 
 type RawFileCardProps = {
   selectedFilePath: string | null
@@ -8,6 +16,7 @@ type RawFileCardProps = {
   selectedFileLoading: boolean
   selectedFileError: string | null
   selectedFileContent: string
+  onOpenFile: (app: "default" | "obsidian") => Promise<void>
   className?: string
 }
 
@@ -19,11 +28,21 @@ export function RawFileCard({
   selectedFileLoading,
   selectedFileError,
   selectedFileContent,
+  onOpenFile,
   className,
 }: RawFileCardProps) {
+  const [openError, setOpenError] = useState<string | null>(null)
+
+  const handleOpen = (app: "default" | "obsidian") => {
+    setOpenError(null)
+    void onOpenFile(app).catch((error: unknown) => {
+      setOpenError(error instanceof Error ? error.message : "Failed to open file")
+    })
+  }
+
   return (
     <section className={cn("overflow-hidden", className)}>
-      <div className="border-b px-4 py-3">
+      <div className="border-b flex flex-col px-4 py-3 gap-2">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">Raw File Content</h2>
           <div className="flex items-center gap-2">
@@ -51,6 +70,41 @@ export function RawFileCard({
         <p className="mt-1 whitespace-normal break-all text-xs text-muted-foreground">
           {selectedFilePath ?? "No file selected"}
         </p>
+        <div className="flex gap-2">
+          <Tooltip>
+            <TooltipTrigger >
+              <Button
+                onClick={() => handleOpen("default")}
+                variant="outline"
+                disabled={!selectedFilePath}
+              >
+                <FolderOpenIcon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Open File</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="default"
+                  variant="outline"
+                  aria-label="Open with Obsidian"
+                  onClick={() => handleOpen("obsidian")}
+                  disabled={!selectedFilePath}
+                />
+              }
+            >
+              <img
+                src="/obsidian-icon.svg"
+                alt=""
+                className="size-4"
+              />
+            </TooltipTrigger>
+            <TooltipContent>Open with Obsidian</TooltipContent>
+          </Tooltip>
+        </div>
+        {openError ? <p className="text-xs text-destructive">{openError}</p> : null}
       </div>
       <div className="p-0">
         {selectedFileLoading ? (

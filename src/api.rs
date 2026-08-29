@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::sync::Arc;
 
 use axum::extract::{Path as RoutePath, Query, State};
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use urlencoding::encode;
 
 use crate::cli::{
     JobCancelArgs, JobIdArgs, JobScheduleArgs, JobUnscheduleArgs, OperatorArg, PlatformArg,
@@ -57,6 +58,19 @@ struct CatalogRootResult {
 #[derive(Debug, Deserialize)]
 struct FileQuery {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenFilePayload {
+    path: String,
+    app: OpenFileApp,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OpenFileApp {
+    Default,
+    Obsidian,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +290,7 @@ pub async fn run_server(host: String, port: u16, config: RuntimeConfig) -> ExitC
         .route("/api/catalog/file", get(catalog_file))
         .route("/api/catalog/preview", get(catalog_preview))
         .route("/api/catalog/media", get(catalog_media))
+        .route("/api/catalog/open", post(catalog_open))
         .route("/api/jobs/ready", get(ready_jobs))
         .route("/api/jobs/scheduled", get(scheduled_jobs))
         .route("/api/jobs/publishing", get(publishing_jobs))
@@ -447,6 +462,126 @@ async fn catalog_preview(State(state): State<ApiState>, Query(query): Query<File
             "publishable": issues.is_empty()
         }
     }))
+}
+
+async fn catalog_open(
+    State(state): State<ApiState>,
+    Json(payload): Json<OpenFilePayload>,
+) -> Response {
+    let requested = PathBuf::from(&payload.path);
+    if !is_valid_markdown_request(&requested, state.catalog_roots.as_slice()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "message": "Path must be an absolute .md file inside configured catalog roots."
+            })),
+        )
+            .into_response();
+    }
+
+    let canonical = match requested.canonicalize() {
+        Ok(path) => path,
+        Err(err) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "ok": false,
+                    "message": format!("Failed to resolve file path: {err}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let (result, opened_url) = match payload.app {
+        OpenFileApp::Default => (open_with_default_app(&canonical), None),
+        OpenFileApp::Obsidian => match open_with_obsidian(&canonical) {
+            Ok(url) => (Ok(()), Some(url)),
+            Err(message) => (Err(message), None),
+        },
+    };
+
+    match result {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "path": canonical,
+            "url": opened_url,
+        }))
+        .into_response(),
+        Err(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "message": message })),
+        )
+            .into_response(),
+    }
+}
+
+fn open_with_default_app(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", path.to_string_lossy().as_ref()]);
+        command
+    };
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    return Err("Opening files is not supported on this operating system.".to_string());
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Failed to open file with the default application: {err}"))
+}
+
+fn open_with_obsidian(path: &Path) -> Result<String, String> {
+    let url = format!(
+        "obsidian://open?path={}",
+        encode(path.to_string_lossy().as_ref())
+    );
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&url);
+        command
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&url);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", &url]);
+        command
+    };
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    return Err("Opening files with Obsidian is not supported on this operating system.".to_string());
+
+    command
+        .spawn()
+        .map(|_| url)
+        .map_err(|err| format!("Failed to open file with Obsidian: {err}"))
 }
 
 async fn catalog_media(

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { FileTree } from "@/components/file-tree"
 import { RawFileCard } from "@/components/raw-file-card"
+import { openCatalogFile } from "@/lib/catalogApi"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
 
@@ -122,6 +123,11 @@ export function CatalogPage() {
           selectedFileLoading={selectedFileLoading}
           selectedFileError={selectedFileError}
           selectedFileContent={selectedFileContent}
+          onOpenFile={(app) =>
+            selectedFilePath
+              ? openCatalogFile(selectedFilePath, app)
+              : Promise.resolve()
+          }
           className={`flex min-w-0 flex-1 flex-col rounded-xl border bg-card ${canUseHorizontalCatalogLayout ? "min-w-[320px] self-start sticky top-4" : "min-w-0"}`}
         />
       </div>

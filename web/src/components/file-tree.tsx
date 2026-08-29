@@ -177,14 +177,14 @@ export function FileTree() {
                                   {scheduledCount}
                                 </FolderCountBadge>
                               ) : null}
-                              {publishedCount > 0 ? (
-                                <FolderCountBadge status="published">
-                                  {publishedCount}
-                                </FolderCountBadge>
-                              ) : null}
                               {failedCount > 0 ? (
                                 <FolderCountBadge status="failed">
                                   {failedCount}
+                                </FolderCountBadge>
+                              ) : null}
+                              {publishedCount > 0 ? (
+                                <FolderCountBadge status="published">
+                                  {publishedCount}
                                 </FolderCountBadge>
                               ) : null}
                               {staleCount > 0 ? (
@@ -338,14 +338,14 @@ function TreeNode({
                 {scheduledCount}
               </FolderCountBadge>
             ) : null}
-            {publishedCount > 0 ? (
-              <FolderCountBadge status="published">
-                {publishedCount}
-              </FolderCountBadge>
-            ) : null}
             {failedCount > 0 ? (
               <FolderCountBadge status="failed">
                 {failedCount}
+              </FolderCountBadge>
+            ) : null}
+            {publishedCount > 0 ? (
+              <FolderCountBadge status="published">
+                {publishedCount}
               </FolderCountBadge>
             ) : null}
             {staleCount > 0 ? (
