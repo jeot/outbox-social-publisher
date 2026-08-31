@@ -9,7 +9,9 @@ export function PlatformIcon({ platform }: PlatformIconProps) {
       ? "/linkedin-icon.webp"
       : normalized === "x"
         ? "/x-icon.webp"
-        : null
+        : normalized === "substack"
+          ? "/substack-icon.png"
+          : null
 
   if (!icon) {
     return (

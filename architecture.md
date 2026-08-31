@@ -246,10 +246,12 @@ individual database or provider failure without weakening duplicate protection.
 
 ### Substack rollout boundary
 
-The Substack adapter currently supports immediate supervised CLI publishing. Text-only
-publishing has been verified on a real feed; image publishing is implemented and covered
-by mocked contract tests but awaits supervised live verification. Substack is not yet a
-valid scheduling or worker platform.
+The Substack adapter supports immediate supervised CLI publishing for text and image
+Notes, both verified on a real feed. Scheduling and one-shot worker execution use the
+same adapter and identify jobs with `platform = "substack"` and
+`publish_mode = "note"`. A scheduled text Note was successfully published through the
+supervised live worker on August 31, 2026. Dry-run and scheduled image-Note verification
+remain before the worker path is considered fully operationally verified.
 
 The next implementation phase should extend the existing pipeline rather than create a
 parallel one:
@@ -260,10 +262,11 @@ parallel one:
 4. Preserve the no-automatic-retry rule whenever the provider outcome is uncertain.
 5. Validate dry-run, then one supervised text job, then one supervised image job.
 
-The initial schema stores platform names as text, so adding Substack may not require a
-schema change. Schema need must be established by the audit, not assumed. If a change is
-required, `migrations/0001_init` remains untouched and a new numbered forward migration
-must upgrade an existing populated database without losing jobs or attempt history.
+The initial schema stores platform names as text, but its publish-mode constraint allowed
+only `single` and `thread`. Migration `0002_remove_publish_mode_constraint` removes that
+closed allowlist without modifying `0001_init`; its upgrade test verifies preservation of
+existing jobs and attempt history and accepts arbitrary future mode names. Publo does not
+maintain dual-schema read/write paths.
 
 ## Human control
 

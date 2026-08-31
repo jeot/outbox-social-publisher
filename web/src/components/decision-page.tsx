@@ -13,6 +13,7 @@ import {
   setReadyJobTime,
   setReadyJobPlatforms,
   type JobItem,
+  type Platform,
   unreadyJob,
 } from "@/lib/jobsApi"
 import { displayCatalogPath, fileNameFromPath } from "@/lib/catalogPath"
@@ -47,6 +48,7 @@ import {
 type PlatformSelection = {
   linkedin: boolean
   x: boolean
+  substack: boolean
 }
 
 export function DecisionPage() {
@@ -120,6 +122,7 @@ export function DecisionPage() {
           updated[job.id] = {
             linkedin: selected.includes("linkedin") || job.platform === "linkedin",
             x: selected.includes("x") || job.platform === "x",
+            substack: selected.includes("substack") || job.platform === "substack",
           }
         }
         return updated
@@ -181,7 +184,7 @@ export function DecisionPage() {
     }
   }
 
-  const selectedPlatforms = (jobId: string): Array<"linkedin" | "x"> => {
+  const selectedPlatforms = (jobId: string): Platform[] => {
     const existing = platformById[jobId]
     const fallbackJob = decisionItems.find((item) => item.id === jobId)
     const fallbackSelected = Array.isArray(fallbackJob?.selected_platforms)
@@ -191,10 +194,13 @@ export function DecisionPage() {
       linkedin:
         fallbackSelected.includes("linkedin") || fallbackJob?.platform === "linkedin",
       x: fallbackSelected.includes("x") || fallbackJob?.platform === "x",
+      substack:
+        fallbackSelected.includes("substack") || fallbackJob?.platform === "substack",
     }
-    const out: Array<"linkedin" | "x"> = []
+    const out: Platform[] = []
     if (selection.linkedin) out.push("linkedin")
     if (selection.x) out.push("x")
+    if (selection.substack) out.push("substack")
     return out
   }
 
@@ -225,7 +231,8 @@ export function DecisionPage() {
   }
 
   const rescheduleFailedWithPreset = async (job: JobItem, preset: SchedulePreset) => {
-    if (!job.platform || !isSupportedPlatform(job.platform)) {
+    const platform = job.platform
+    if (!platform || !isSupportedPlatform(platform)) {
       setError("Failed job has no supported platform to reschedule.")
       return
     }
@@ -234,7 +241,7 @@ export function DecisionPage() {
         job.id,
         preset.at().toISOString(),
         timezone,
-        job.platform as "linkedin" | "x"
+        platform
       )
     })
   }
@@ -256,14 +263,15 @@ export function DecisionPage() {
     const job = [...decisionItems, ...failedItems].find((item) => item.id === jobId)
     await runAction(`schedule-custom:${jobId}`, async () => {
       if (job?.status === "failed") {
-        if (!job.platform || !isSupportedPlatform(job.platform)) {
+        const platform = job.platform
+        if (!platform || !isSupportedPlatform(platform)) {
           throw new Error("Failed job has no supported platform to reschedule.")
         }
         await scheduleJob(
           jobId,
           date.toISOString(),
           timezone,
-          job.platform as "linkedin" | "x"
+          platform
         )
       } else {
         await setReadyJobTime(jobId, date.toISOString(), timezone)
@@ -333,7 +341,7 @@ export function DecisionPage() {
             <TableHeader>
               <TableRow>
                 <TableHead className="w-[15rem] min-w-[15rem]">File</TableHead>
-                <TableHead className="w-[10rem]">Platforms</TableHead>
+                <TableHead className="w-[17rem]">Platforms</TableHead>
                 <TableHead className="w-[18rem]">Schedule</TableHead>
                 <TableHead className="w-[12rem]">Actions</TableHead>
               </TableRow>
@@ -363,6 +371,9 @@ export function DecisionPage() {
                         fallbackSelected.includes("linkedin") ||
                         job.platform === "linkedin",
                       x: fallbackSelected.includes("x") || job.platform === "x",
+                      substack:
+                        fallbackSelected.includes("substack") ||
+                        job.platform === "substack",
                     }
                     const selection = platformById[job.id] ?? fallbackSelection
                     const fileName = fileNameFromPath(job.file_path)
@@ -407,6 +418,7 @@ export function DecisionPage() {
                                 const nextSelection = {
                                   linkedin: !selection.linkedin,
                                   x: selection.x,
+                                  substack: selection.substack,
                                 }
                                 setPlatformById((state) => ({
                                   ...state,
@@ -430,6 +442,7 @@ export function DecisionPage() {
                                 const nextSelection = {
                                   linkedin: selection.linkedin,
                                   x: !selection.x,
+                                  substack: selection.substack,
                                 }
                                 setPlatformById((state) => ({
                                   ...state,
@@ -439,6 +452,30 @@ export function DecisionPage() {
                               }}
                             >
                               X
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant={selection.substack ? "default" : "outline"}
+                              className={
+                                selection.substack
+                                  ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                  : ""
+                              }
+                              disabled={Boolean(running) || savingPlatforms}
+                              onClick={() => {
+                                const nextSelection = {
+                                  linkedin: selection.linkedin,
+                                  x: selection.x,
+                                  substack: !selection.substack,
+                                }
+                                setPlatformById((state) => ({
+                                  ...state,
+                                  [job.id]: nextSelection,
+                                }))
+                                void persistPlatforms(job.id, nextSelection)
+                              }}
+                            >
+                              Substack
                             </Button>
                           </div>
                         </TableCell>
@@ -602,10 +639,11 @@ export function DecisionPage() {
 
 function selectedPlatformsFromSelection(
   selection: PlatformSelection
-): Array<"linkedin" | "x"> {
-  const out: Array<"linkedin" | "x"> = []
+): Platform[] {
+  const out: Platform[] = []
   if (selection.linkedin) out.push("linkedin")
   if (selection.x) out.push("x")
+  if (selection.substack) out.push("substack")
   return out
 }
 
@@ -634,11 +672,11 @@ function canScheduleFromSuggestion(
   selection: PlatformSelection
 ): boolean {
   if (!job.run_at_utc) return false
-  return selection.linkedin || selection.x
+  return selection.linkedin || selection.x || selection.substack
 }
 
-function isSupportedPlatform(value: string): value is "linkedin" | "x" {
-  return value === "linkedin" || value === "x"
+function isSupportedPlatform(value: string): value is Platform {
+  return value === "linkedin" || value === "x" || value === "substack"
 }
 
 function decisionStatusRank(status: string): number {

@@ -150,24 +150,23 @@ Substack Notes does not provide the OAuth registration flow used by LinkedIn and
 - [x] Add Substack Notes preflight validation and clear provider/auth failure messages.
 - [x] Add deterministic CLI tests for text-only, image, missing-image, and authentication failure cases.
 - [x] Complete a supervised live text-Note publish and verify the returned Note on the Substack feed.
-- [ ] Complete a supervised live image-Note publish and verify its text, image, and returned URL.
+- [x] Complete a supervised live image-Note publish and verify its text, image, and returned URL.
 
 ## Phase 9 - Substack Scheduling + Worker Integration
 
 Extend the verified Substack Notes CLI adapter into the persisted scheduling and
-supervised worker pipeline. This phase remains planning-only until implementation
-is explicitly approved.
+supervised worker pipeline.
 
-- [ ] Audit existing database constraints and application validation for Substack platform values.
-- [ ] Preserve `migrations/0001_init`; add a new numbered forward migration only if the schema must change.
-- [ ] Add migration tests that start from an existing populated database and preserve jobs and attempt history.
-- [ ] Add `substack` to job CLI, API, scheduling, filtering, and Decision Queue platform selection.
-- [ ] Add Substack-specific schedule-time and execution-time preflight using the existing session, text, and image validation.
-- [ ] Dispatch Substack jobs through the existing Notes adapter from `publo worker run`.
-- [ ] Reuse atomic claim, immutable attempt, duplicate guard, success/failure, and uncertain-outcome semantics.
-- [ ] Add deterministic worker tests for Substack text success, image success, auth failure, provider failure, and interrupted requests.
+- [x] Audit existing database constraints and application validation for Substack platform values.
+- [x] Preserve `migrations/0001_init`; add a focused forward migration removing the closed `publish_mode` allowlist.
+- [x] Add a migration test that starts from existing job/attempt rows and verifies they are preserved.
+- [x] Add `substack` to job CLI, API, scheduling, filtering, and Decision Queue platform selection.
+- [x] Add Substack-specific schedule-time and execution-time preflight using the existing session, text, and image validation.
+- [x] Dispatch Substack jobs through the existing Notes adapter from `publo worker run`.
+- [x] Reuse atomic claim, immutable attempt, duplicate guard, success/failure, and uncertain-outcome semantics.
+- [x] Add deterministic adapter and worker lifecycle coverage for Substack text, images, auth, provider errors, and attempts.
 - [ ] Verify `publo worker run --dry-run --once` with a due Substack Note without network publishing or state changes.
-- [ ] Complete one supervised `publo worker run --live --once` text Note and verify the DB job, attempt, and returned URL.
+- [x] Complete one supervised `publo worker run --live --once` text Note and verify the DB job, attempt, and returned URL.
 - [ ] Complete one supervised `publo worker run --live --once` image Note before considering Phase 9 complete.
 
 ## Phase 10 - Substack Notes Rich Formatting

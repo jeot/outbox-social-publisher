@@ -49,9 +49,10 @@ You: "Publo, what am I publishing tomorrow?"
 Publo: "LinkedIn at 10:00 and X at 15:00."
 ```
 
-The current Substack milestone validates this direction: Publo can publish a text
-Note directly from a local file through a supervised CLI action. Image Notes are
-implemented and remain subject to a supervised live check before worker automation.
+The current Substack milestone validates this direction: Publo can publish text and
+image Notes directly from local files through supervised CLI actions, and a scheduled
+text Note has been published successfully through the one-shot live worker. Dry-run and
+scheduled image verification remain before continuous automation.
 
 ## Local-first philosophy (long-term)
 

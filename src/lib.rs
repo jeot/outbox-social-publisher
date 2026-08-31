@@ -980,6 +980,7 @@ fn selected_platforms_from_json(raw: &str) -> Vec<String> {
         let normalized = match value.as_str() {
             "linkedin" => Some("linkedin"),
             "x" => Some("x"),
+            "substack" => Some("substack"),
             _ => None,
         };
         if let Some(platform) = normalized
@@ -1119,7 +1120,7 @@ fn job_import_published(
     if platforms.is_empty() {
         return Err(AppError::Validation {
             message: "At least one --platform is required.".to_string(),
-            suggestion: Some("Use --platform linkedin,x.".to_string()),
+            suggestion: Some("Use --platform linkedin,x,substack.".to_string()),
             command: None,
         });
     }
@@ -1462,7 +1463,10 @@ pub(crate) fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Res
             return Err(AppError::Validation {
                 message: "This decision has multiple platforms. Pass --platform when scheduling."
                     .to_string(),
-                suggestion: Some("Use --platform linkedin or --platform x.".to_string()),
+                suggestion: Some(
+                    "Use --platform linkedin, --platform x, or --platform substack."
+                        .to_string(),
+                ),
                 command: None,
             })
         }
@@ -1470,7 +1474,10 @@ pub(crate) fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Res
             return Err(AppError::Validation {
                 message: "This ready job has no platform. Pass --platform when scheduling."
                     .to_string(),
-                suggestion: Some("Use --platform linkedin or --platform x.".to_string()),
+                suggestion: Some(
+                    "Use --platform linkedin, --platform x, or --platform substack."
+                        .to_string(),
+                ),
                 command: None,
             })
         }
@@ -1478,6 +1485,7 @@ pub(crate) fn job_schedule(args: JobScheduleArgs, config: &RuntimeConfig) -> Res
     job.platform = Some(selected_platform);
     job.publish_mode = match job.platform.as_deref() {
         Some("x") => Some("single".to_string()),
+        Some("substack") => Some("note".to_string()),
         _ => None,
     };
 
@@ -2177,6 +2185,21 @@ async fn publish_worker_job(
             )
             .await?
         }
+        Some("substack") => {
+            publish_substack(
+                PublishSubstackArgs {
+                    file: PathBuf::from(&job.file_path),
+                    pass: None,
+                    timeout_seconds: None,
+                    allow_duplicate: false,
+                    debug: false,
+                    add_signature: false,
+                    no_signature: false,
+                },
+                config,
+            )
+            .await?
+        }
         Some(other) => {
             return Err(AppError::Validation {
                 message: format!("Unsupported job platform: {other}"),
@@ -2705,9 +2728,40 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
                 }),
             })
         }
+        Some("substack") => {
+            let auth = load_substack_auth()?;
+            let signature_text =
+                resolve_signature_text(config, PublishPlatformKind::Substack, None)?;
+            let text = if let Some(signature) = signature_text {
+                format!("{}{}", parsed.publish_text, signature)
+            } else {
+                parsed.publish_text
+            };
+            let body_json = build_note_body(&text)?;
+            let text_sha256 = compute_content_sha256(text.as_bytes());
+            let author_key = auth.publication_url.as_str().trim_end_matches('/');
+            let fingerprint_source =
+                combine_text_and_media_for_fingerprint(&text, &media_sha);
+            let fingerprint =
+                compute_fingerprint("substack", author_key, &fingerprint_source);
+            Ok(JobPreflightResult {
+                file_sha256: parsed.file_sha256,
+                text_sha256,
+                fingerprint,
+                details: json!({
+                    "platform": "substack",
+                    "publish_mode": "note",
+                    "media_count": parsed.media_paths.len(),
+                    "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "text": text,
+                    "payload": note_payload_preview(body_json, parsed.media_paths.len()),
+                    "publication_url": auth.publication_url.as_str()
+                }),
+            })
+        }
         Some(other) => Err(AppError::Validation {
             message: format!("Unsupported job platform: {other}"),
-            suggestion: Some("Use --platform linkedin|x.".to_string()),
+            suggestion: Some("Use --platform linkedin|x|substack.".to_string()),
             command: None,
         }),
         None => Err(AppError::Validation {
@@ -2766,6 +2820,7 @@ fn publish_mode_for_platform(platform: PlatformArg) -> Option<&'static str> {
     match platform {
         PlatformArg::X => Some("single"),
         PlatformArg::Linkedin => None,
+        PlatformArg::Substack => Some("note"),
     }
 }
 
@@ -5420,20 +5475,33 @@ mod worker_tests {
         TestWorkspace { root, config }
     }
 
-    fn insert_due_job(workspace: &TestWorkspace, file_path: &PathBuf) -> String {
+    fn insert_due_job(workspace: &TestWorkspace, file_path: &std::path::Path) -> String {
+        insert_due_job_for_platform(workspace, file_path, "linkedin", None)
+    }
+
+    fn insert_due_job_for_platform(
+        workspace: &TestWorkspace,
+        file_path: &std::path::Path,
+        platform: &str,
+        publish_mode: Option<&str>,
+    ) -> String {
         let id = generate_id();
         let mut conn = open_db(&workspace.config).expect("open test database");
+        let selected_platforms = serde_json::to_string(&[platform]).expect("platform json");
         sql_query(
             "INSERT INTO jobs (
-                id, action_group_id, content_group_id, asset_id, kind, status, platform, workspace_id,
+                id, action_group_id, content_group_id, asset_id, kind, status, platform, publish_mode, workspace_id,
                 selected_platforms, file_path, run_at_utc, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, 'catalog', 'scheduled', 'linkedin', ?, '[\"linkedin\"]', ?, '2020-01-01T00:00:00+00:00', ?, ?)",
+             ) VALUES (?, ?, ?, ?, 'catalog', 'scheduled', ?, ?, ?, ?, ?, '2020-01-01T00:00:00+00:00', ?, ?)",
         )
         .bind::<Text, _>(&id)
         .bind::<Text, _>(generate_id())
         .bind::<Text, _>(generate_id())
         .bind::<Text, _>(generate_id())
+        .bind::<Text, _>(platform)
+        .bind::<Nullable<Text>, _>(publish_mode)
         .bind::<Text, _>(&workspace.config.workspace_id)
+        .bind::<Text, _>(&selected_platforms)
         .bind::<Text, _>(file_path.display().to_string())
         .bind::<Text, _>(now_rfc3339_utc())
         .bind::<Text, _>(now_rfc3339_utc())
@@ -5450,7 +5518,7 @@ mod worker_tests {
 
     fn attempt_rows(conn: &mut SqliteConnection, job_id: &str) -> Vec<TestAttemptRow> {
         sql_query(
-            "SELECT success, error_type, post_id
+            "SELECT platform, success, error_type, post_id
              FROM publish_attempts WHERE job_id = ? ORDER BY attempt_no ASC",
         )
         .bind::<Text, _>(job_id)
@@ -5460,6 +5528,8 @@ mod worker_tests {
 
     #[derive(Debug, QueryableByName)]
     struct TestAttemptRow {
+        #[diesel(sql_type = Text)]
+        platform: String,
         #[diesel(sql_type = Integer)]
         success: i32,
         #[diesel(sql_type = Nullable<Text>)]
@@ -5595,6 +5665,41 @@ mod worker_tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].success, 1);
         assert_eq!(attempts[0].post_id.as_deref(), Some("fake-post-1"));
+    }
+
+    #[test]
+    fn substack_job_uses_note_mode_and_records_platform_attempt() {
+        let workspace = test_workspace();
+        let file = write_post(&workspace, "substack-note.md");
+        let job_id =
+            insert_due_job_for_platform(&workspace, &file, "substack", Some("note"));
+        let now = now_rfc3339_utc();
+        let mut conn = open_db(&workspace.config).expect("open database");
+        let claimed = claim_due_job(&mut conn, &job_id, &now)
+            .expect("claim Substack job")
+            .expect("Substack job is claimed");
+
+        assert_eq!(claimed.job.platform.as_deref(), Some("substack"));
+        assert_eq!(claimed.job.publish_mode.as_deref(), Some("note"));
+        execute_claimed_job(
+            &mut conn,
+            &claimed.job,
+            &claimed.claim_token,
+            &FakeWorkerPublisher {
+                outcome: FakePublishOutcome::Success,
+            },
+            &now,
+        )
+        .expect("execute fake Substack publish");
+
+        let saved = get_job_by_id(&mut conn, &job_id).expect("read published job");
+        let attempts = attempt_rows(&mut conn, &job_id);
+        assert_eq!(saved.status, "published");
+        assert_eq!(saved.platform.as_deref(), Some("substack"));
+        assert_eq!(saved.publish_mode.as_deref(), Some("note"));
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].platform, "substack");
+        assert_eq!(attempts[0].success, 1);
     }
 
     #[test]
@@ -5869,6 +5974,32 @@ mod worker_tests {
             "Previously published",
         ]);
         assert!(missing_operator.is_err());
+    }
+
+    #[test]
+    fn substack_platform_parses_and_round_trips_in_job_metadata() {
+        let cli = Cli::try_parse_from([
+            "publo",
+            "job",
+            "list",
+            "--platform",
+            "substack",
+        ])
+        .expect("parse Substack job filter");
+        match cli.command {
+            Commands::Job(JobArgs {
+                command: JobCommand::List(args),
+            }) => assert!(matches!(args.platform, Some(PlatformArg::Substack))),
+            _ => panic!("expected job list command"),
+        }
+        assert_eq!(
+            selected_platforms_from_json("[\"linkedin\",\"substack\",\"substack\"]"),
+            vec!["linkedin".to_string(), "substack".to_string()]
+        );
+        assert_eq!(
+            publish_mode_for_platform(PlatformArg::Substack),
+            Some("note")
+        );
     }
 
     #[test]

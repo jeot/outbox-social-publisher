@@ -117,3 +117,97 @@ pub(crate) fn open_db(config: &RuntimeConfig) -> Result<SqliteConnection, AppErr
         ),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(QueryableByName)]
+    struct PublishModeRow {
+        #[diesel(sql_type = Text)]
+        publish_mode: String,
+    }
+
+    #[test]
+    fn publish_mode_migration_removes_allowlist_and_preserves_existing_data() {
+        let mut conn = SqliteConnection::establish(":memory:").expect("open in-memory database");
+        conn.run_next_migration(MIGRATIONS)
+            .expect("run initial migration");
+        sql_query(
+            "INSERT INTO workspace_meta (singleton, workspace_id) VALUES (1, 'workspace-test')",
+        )
+        .execute(&mut conn)
+        .expect("insert workspace identity");
+        sql_query(
+            "INSERT INTO jobs (
+                id, action_group_id, content_group_id, asset_id, kind, status,
+                platform, publish_mode, workspace_id, selected_platforms,
+                file_path, run_at_utc
+             ) VALUES (
+                'job-x', 'action-x', 'content-x', 'asset-x', 'catalog',
+                'published', 'x', 'single', 'workspace-test', '[\"x\"]',
+                '/tmp/x.md', '2026-08-31T00:00:00Z'
+             )",
+        )
+        .execute(&mut conn)
+        .expect("insert existing job");
+        sql_query(
+            "INSERT INTO publish_attempts (
+                id, job_id, attempt_no, platform, workspace_id, trigger_mode,
+                started_at, success
+             ) VALUES (
+                'attempt-x', 'job-x', 1, 'x', 'workspace-test', 'worker',
+                '2026-08-31T00:00:00Z', 1
+             )",
+        )
+        .execute(&mut conn)
+        .expect("insert existing attempt");
+
+        conn.run_next_migration(MIGRATIONS)
+            .expect("run open publish-mode migration");
+
+        let jobs: CountRow = sql_query("SELECT COUNT(*) AS count FROM jobs")
+            .get_result(&mut conn)
+            .expect("count preserved jobs");
+        let attempts: CountRow = sql_query("SELECT COUNT(*) AS count FROM publish_attempts")
+            .get_result(&mut conn)
+            .expect("count preserved attempts");
+        let existing_mode: PublishModeRow =
+            sql_query("SELECT publish_mode FROM jobs WHERE id = 'job-x'")
+                .get_result(&mut conn)
+                .expect("read preserved publish mode");
+        assert_eq!(jobs.count, 1);
+        assert_eq!(attempts.count, 1);
+        assert_eq!(existing_mode.publish_mode, "single");
+
+        sql_query(
+            "INSERT INTO jobs (
+                id, action_group_id, content_group_id, asset_id, kind, status,
+                platform, publish_mode, workspace_id, selected_platforms,
+                file_path, run_at_utc
+             ) VALUES (
+                'job-substack', 'action-substack', 'content-substack',
+                'asset-substack', 'catalog', 'scheduled', 'substack', 'note',
+                'workspace-test', '[\"substack\"]', '/tmp/substack.md',
+                '2026-09-01T00:00:00Z'
+             )",
+        )
+        .execute(&mut conn)
+        .expect("insert Substack Note job after migration");
+
+        sql_query(
+            "INSERT INTO jobs (
+                id, action_group_id, content_group_id, asset_id, kind, status,
+                platform, publish_mode, workspace_id, selected_platforms,
+                file_path, run_at_utc
+             ) VALUES (
+                'job-future', 'action-future', 'content-future', 'asset-future',
+                'catalog', 'scheduled', 'substack', 'future-format',
+                'workspace-test', '[\"substack\"]', '/tmp/future.md',
+                '2026-09-02T00:00:00Z'
+             )",
+        )
+        .execute(&mut conn)
+        .expect("insert arbitrary future publish mode after migration");
+    }
+}

@@ -5,8 +5,9 @@ Publo supports Substack Notes only. It does not create or publish Substack artic
 Current verification status:
 
 - Text-only Notes: live-verified on August 31, 2026.
-- Image Notes: implemented and contract-tested; supervised live verification pending.
-- Scheduled/worker publishing: planned, not implemented.
+- Image Notes: live-verified on August 31, 2026.
+- Scheduled/worker publishing: text Note live-verified on August 31, 2026; dry-run and
+  scheduled image-Note verification remain.
 
 Substack does not provide Publo with an OAuth publishing flow. Publo therefore uses
 the authenticated browser session used by Substack's observed web API. This is an
@@ -74,9 +75,20 @@ origin/referrer headers, and canonical write paths for compatibility. A definiti
 HTTP 403 is reported as rejected; a transport failure after sending remains an
 unknown outcome.
 
-## Next phase: scheduling and worker support
+## Scheduled and worker publishing
 
-Substack is not yet accepted by job scheduling or `publo worker run`. The planned
-integration will reuse the existing job lifecycle, atomic claim, immutable publish
-attempts, and uncertain-outcome protections. Any required database schema change
-will be delivered as a new forward migration; the initial migration will not be edited.
+Substack is accepted by job scheduling and `publo worker run` as
+`publish_mode = "note"`. It reuses the existing job lifecycle, atomic claim, immutable
+publish attempts, and uncertain-outcome protections. Migration `0002` removes the closed
+publish-mode allowlist while preserving existing data, allowing `note` and future modes
+without additional schema migrations. The initial migration remains unchanged.
+
+Before relying on scheduled Substack publishing, complete the supervised sequence:
+
+```bash
+publo worker run --dry-run --once
+publo worker run --live --once --pass <publish-pass>
+```
+
+The live command processes at most one oldest-due job. Confirm the resulting Note on
+Substack and inspect its job and attempt details in Publo.

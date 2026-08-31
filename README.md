@@ -15,14 +15,14 @@ Platform setup guides:
 
 - LinkedIn: text + image + multi-image publishing
 - X: text + image publishing (up to 4 images)
-- Substack Notes: live-verified text publishing; image publishing implemented and awaiting a supervised live check
+- Substack Notes: live-verified text and image publishing
 - Guided OAuth login for both platforms
 - Manual OAuth exchange fallback for both platforms
 - Token status/refresh commands for both platforms
 - Local-first parsing for Obsidian notes (`---` split + `![[...]]`)
 - Duplicate guard + JSONL publish log
 - SQLite scheduling lifecycle with immutable publish attempts
-- Supervised one-job live worker for LinkedIn and X
+- Supervised one-job live worker for LinkedIn, X, and Substack Notes
 - Local GUI for catalog, decision queue, scheduled, publishing, failed, and published states
 
 ## Feature matrix
@@ -30,14 +30,15 @@ Platform setup guides:
 | Capability | LinkedIn | X | Substack Notes |
 |---|---|---|---|
 | Text post | ✅ | ✅ | ✅ live-verified |
-| Single image | ✅ | ✅ | 🧪 implemented |
-| Multi-image | ✅ (2-20) | ✅ (1-4) | 🧪 implemented |
+| Single image | ✅ | ✅ | ✅ live-verified |
+| Multi-image | ✅ (2-20) | ✅ (1-4) | 🧪 contract-tested |
 | Guided OAuth callback login | ✅ | ✅ | N/A |
 | Manual OAuth exchange | ✅ | ✅ | N/A |
 | Auth/session status | ✅ | ✅ | ✅ |
 | Token refresh | ✅ | ✅ | Manual session replacement |
 | Auto refresh during publish on 401 | ✅ | ✅ | N/A |
 | Debug no-send mode (`--debug`) | ✅ | ✅ | ✅ |
+| Scheduled one-shot worker | ✅ | ✅ | ✅ implemented; live worker check pending |
 
 ## Prerequisites
 
@@ -288,15 +289,18 @@ Options:
 
 Text-only and image Notes use the shared Obsidian parsing and media-resolution rules.
 Text-only publishing was verified against a real Substack feed on August 31, 2026.
-Image publishing is contract-tested but still requires its first supervised live verification.
+Image publishing was also verified against a real Substack feed on August 31, 2026.
 See [the setup guide](docs/platforms/substack-setup.md) and the
 [pinned unofficial API reference](docs/platforms/substack-unofficial-api-reference.md).
 
-Substack scheduling and `publo worker run` support are the next planned phase. The
-existing database stores platform names as text, but implementation must still audit
-all persistence and validation paths. Applied migrations are immutable: if a schema
-change is actually required, it must be introduced as a new numbered forward migration,
-with an upgrade test against an existing populated database.
+Substack scheduling and `publo worker run` use `publish_mode = "note"` to remain
+separate from possible future article support. Migration `0002` removes the original
+closed publish-mode constraint while preserving jobs and attempts, so future modes do
+not require schema changes. The initial migration remains immutable. Complete a
+supervised dry-run and one live worker publication before treating the worker path as
+operationally verified. A scheduled text Note was successfully published with
+`publo worker run --live --once` on August 31, 2026; dry-run and scheduled image-Note
+verification remain.
 
 ## X setup
 

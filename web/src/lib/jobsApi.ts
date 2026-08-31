@@ -1,7 +1,10 @@
+export type Platform = "linkedin" | "x" | "substack"
+
 export type JobItem = {
   id: string
   status: string
   platform: string | null
+  publish_mode: string | null
   selected_platforms?: string[]
   file_path: string
   run_at_utc: string | null
@@ -125,7 +128,7 @@ export async function unreadyJob(id: string): Promise<void> {
   await postJson("/api/jobs/unready", { id }, "unready API")
 }
 
-export async function setJobPlatform(id: string, platform: "linkedin" | "x"): Promise<void> {
+export async function setJobPlatform(id: string, platform: Platform): Promise<void> {
   await postJson("/api/jobs/platform/set", { id, platform }, "set platform API")
 }
 
@@ -137,7 +140,7 @@ export async function scheduleJob(
   id: string,
   at: string,
   timezone: string,
-  platform?: "linkedin" | "x"
+  platform?: Platform
 ): Promise<any> {
   const payload: Record<string, unknown> = { id, at, timezone }
   if (platform) payload.platform = platform
@@ -148,7 +151,7 @@ export async function scheduleJobMulti(
   id: string,
   at: string,
   timezone: string,
-  platforms: Array<"linkedin" | "x">
+  platforms: Platform[]
 ): Promise<any> {
   const payload: Record<string, unknown> = { id, at, timezone, platforms }
   return postJson("/api/jobs/schedule-multi", payload, "schedule multi API")
@@ -172,7 +175,7 @@ export async function setScheduledJobTime(
 
 export async function setReadyJobPlatforms(
   id: string,
-  platforms: Array<"linkedin" | "x">
+  platforms: Platform[]
 ): Promise<void> {
   await postJson("/api/jobs/platforms", { id, platforms }, "job platforms API")
 }

@@ -1082,7 +1082,7 @@ async fn job_set_platform(
             return Json(json!({
                 "ok": false,
                 "error_type": "validation_error",
-                "message": "Invalid platform. Use linkedin or x."
+                "message": "Invalid platform. Use linkedin, x, or substack."
             }));
         }
     };
@@ -1201,7 +1201,7 @@ async fn schedule_job(
                 return Json(json!({
                     "ok": false,
                     "error_type": "validation_error",
-                    "message": "Invalid platform. Use linkedin or x."
+                    "message": "Invalid platform. Use linkedin, x, or substack."
                 }));
             }
         },
@@ -1412,10 +1412,10 @@ async fn schedule_multi_job(
     let mut scheduled_ids: Vec<(String, PlatformArg)> = Vec::new();
     let tx_result = conn.transaction::<(), diesel::result::Error, _>(|tx| {
         for (platform, snapshot) in &preflight_ok {
-            let publish_mode = if matches!(platform, PlatformArg::X) {
-                Some("single")
-            } else {
-                None
+            let publish_mode = match platform {
+                PlatformArg::X => Some("single"),
+                PlatformArg::Substack => Some("note"),
+                PlatformArg::Linkedin => None,
             };
             let selected_platforms_json = selected_platforms_json(&[*platform]);
 
@@ -2202,6 +2202,7 @@ fn parse_platform_arg(raw: &str) -> Option<PlatformArg> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "linkedin" => Some(PlatformArg::Linkedin),
         "x" => Some(PlatformArg::X),
+        "substack" => Some(PlatformArg::Substack),
         _ => None,
     }
 }
@@ -2216,7 +2217,9 @@ fn normalize_platform_list(raw_items: &[String]) -> Result<Vec<PlatformArg>, Str
     let mut out: Vec<PlatformArg> = Vec::new();
     for item in raw_items {
         let Some(platform) = parse_platform_arg(item.as_str()) else {
-            return Err(format!("Invalid platform: {item}. Use linkedin or x."));
+            return Err(format!(
+                "Invalid platform: {item}. Use linkedin, x, or substack."
+            ));
         };
         if !out.contains(&platform) {
             out.push(platform);
@@ -2281,6 +2284,7 @@ fn selected_platforms_from_json(raw: &str) -> Vec<String> {
         let normalized = match value.as_str() {
             "linkedin" => Some("linkedin"),
             "x" => Some("x"),
+            "substack" => Some("substack"),
             _ => None,
         };
         if let Some(platform) = normalized

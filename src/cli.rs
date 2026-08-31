@@ -208,6 +208,7 @@ pub(crate) struct JobImportPublishedArgs {
 pub(crate) enum PlatformArg {
     Linkedin,
     X,
+    Substack,
 }
 
 impl PlatformArg {
@@ -215,6 +216,7 @@ impl PlatformArg {
         match self {
             PlatformArg::Linkedin => "linkedin",
             PlatformArg::X => "x",
+            PlatformArg::Substack => "substack",
         }
     }
 }

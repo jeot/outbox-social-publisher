@@ -15,7 +15,7 @@ Verification status as of August 31, 2026:
 
 - Authentication/profile lookup: live-verified.
 - Text-only Note publish: live-verified and confirmed on the account feed.
-- Image Note publish: mocked contract verified; supervised live verification pending.
+- Image Note publish: live-verified and confirmed on the account feed.
 
 ## Ported contracts
 
