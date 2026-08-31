@@ -170,7 +170,22 @@ is explicitly approved.
 - [ ] Complete one supervised `publo worker run --live --once` text Note and verify the DB job, attempt, and returned URL.
 - [ ] Complete one supervised `publo worker run --live --once` image Note before considering Phase 9 complete.
 
-## Phase 10 - Advanced Local GUI (List + Calendar + Actions)
+## Phase 10 - Substack Notes Rich Formatting
+
+Convert authored Markdown into Substack's ProseMirror representation so formatting
+is rendered rather than published as literal Markdown characters. Keep one shared
+conversion path for immediate CLI and scheduled worker publishing.
+
+- [ ] Define the supported Markdown subset and unsupported-syntax behavior.
+- [ ] Convert bold and italic text into Substack-compatible marks.
+- [ ] Convert bulleted and numbered lists into list and list-item nodes.
+- [ ] Convert links, blockquotes, line breaks, and supported headings.
+- [ ] Preserve plain-text paragraphs, Unicode, blank lines, and image attachments.
+- [ ] Add deterministic converter fixtures for nested and mixed formatting.
+- [ ] Add debug-preview coverage that exposes the final ProseMirror payload.
+- [ ] Complete supervised live verification for each supported formatting category.
+
+## Phase 11 - Advanced Local GUI (List + Calendar + Actions)
 
 Expand GUI after worker behavior is available.
 
@@ -181,7 +196,7 @@ Expand GUI after worker behavior is available.
 - [ ] Add filters by platform/status/date.
 - [ ] Keep GUI as interface layer; keep publish/schedule logic in Rust core.
 
-## Phase 11 - Remote Worker + Sync (Optional)
+## Phase 12 - Remote Worker + Sync (Optional)
 
 Allow always-on publishing even when laptop is offline by separating authoring location from worker runtime.
 
@@ -192,7 +207,7 @@ Allow always-on publishing even when laptop is offline by separating authoring l
 - [ ] Add result/status sync back to local machine and GUI.
 - [ ] Document offline behavior and recovery guarantees.
 
-## Phase 12 - Platform Expansion (Instagram)
+## Phase 13 - Platform Expansion (Instagram)
 
 Expand platform coverage using the same publish pipeline and scheduler architecture.
 
@@ -202,7 +217,7 @@ Expand platform coverage using the same publish pipeline and scheduler architect
 - [ ] Add scheduler integration for Instagram and independent failure handling.
 - [ ] Add platform-specific preflight checks before scheduling.
 
-## Phase 13 - Public Distribution (Optional, End-Stage)
+## Phase 14 - Public Distribution (Optional, End-Stage)
 
 Package Publo for external developers with reproducible builds and release hygiene.
 
