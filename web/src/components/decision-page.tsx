@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react"
-import { CheckIcon, Link2Icon, SparklesIcon } from "lucide-react"
+import { CheckIcon, SparklesIcon } from "lucide-react"
 
 import {
   listBlockedJobs,
   listCanceledJobs,
   listDisabledJobs,
   listFailedJobs,
+  listJobAttempts,
   listReadyJobs,
+  scheduleJob,
   scheduleJobMulti,
   setReadyJobTime,
   setReadyJobPlatforms,
@@ -29,6 +31,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { ScheduleControls } from "@/components/schedule-controls"
+import { ShowFileButton } from "@/components/show-file-button"
 import { StatusBadge } from "@/components/status-badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -40,7 +43,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 type PlatformSelection = {
   linkedin: boolean
@@ -69,6 +71,8 @@ export function DecisionPage() {
   const loadCatalog = useCatalogStore((state) => state.loadCatalog)
   const revealFileInTree = useCatalogStore((state) => state.revealFileInTree)
   const selectFile = useCatalogStore((state) => state.selectFile)
+  const setSelectedAttempts = useCatalogStore((state) => state.setSelectedAttempts)
+  const setSelectedFailedJob = useCatalogStore((state) => state.setSelectedFailedJob)
   const rootPaths = useMemo(() => roots.map((item) => item.root), [roots])
   const staleItems = useMemo(
     () => [...blockedItems, ...canceledItems, ...disabledItems],
@@ -161,6 +165,17 @@ export function DecisionPage() {
     setPreviewPanelOpen(true)
     try {
       await selectFile(job.file_path)
+      if (job.status === "failed") {
+        const attempts = await listJobAttempts(job.id)
+        setSelectedAttempts(attempts)
+        setSelectedFailedJob({
+          id: job.id,
+          platform: job.platform,
+          statusReason: job.status_reason,
+          attemptCount: job.attempt_count,
+          attempts,
+        })
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to load preview")
     }
@@ -209,6 +224,21 @@ export function DecisionPage() {
     })
   }
 
+  const rescheduleFailedWithPreset = async (job: JobItem, preset: SchedulePreset) => {
+    if (!job.platform || !isSupportedPlatform(job.platform)) {
+      setError("Failed job has no supported platform to reschedule.")
+      return
+    }
+    await runAction(`reschedule:${job.id}:${preset.key}`, async () => {
+      await scheduleJob(
+        job.id,
+        preset.at().toISOString(),
+        timezone,
+        job.platform as "linkedin" | "x"
+      )
+    })
+  }
+
   const scheduleCustom = async (jobId: string) => {
     const datePart = customDateById[jobId]
     const timePart = customTimeById[jobId]
@@ -223,8 +253,21 @@ export function DecisionPage() {
       return
     }
 
-    await runAction(`ready-time:${jobId}`, async () => {
-      await setReadyJobTime(jobId, date.toISOString(), timezone)
+    const job = [...decisionItems, ...failedItems].find((item) => item.id === jobId)
+    await runAction(`schedule-custom:${jobId}`, async () => {
+      if (job?.status === "failed") {
+        if (!job.platform || !isSupportedPlatform(job.platform)) {
+          throw new Error("Failed job has no supported platform to reschedule.")
+        }
+        await scheduleJob(
+          jobId,
+          date.toISOString(),
+          timezone,
+          job.platform as "linkedin" | "x"
+        )
+      } else {
+        await setReadyJobTime(jobId, date.toISOString(), timezone)
+      }
     })
     setCustomDialogJobId(null)
   }
@@ -259,7 +302,7 @@ export function DecisionPage() {
   }
 
   const customDialogJob = customDialogJobId
-    ? decisionItems.find((item) => item.id === customDialogJobId) ?? null
+    ? [...decisionItems, ...failedItems].find((item) => item.id === customDialogJobId) ?? null
     : null
   const customDialogDate = customDialogJobId ? customDateById[customDialogJobId] ?? "" : ""
   const customDialogTime = customDialogJobId ? customTimeById[customDialogJobId] ?? "" : ""
@@ -429,23 +472,12 @@ export function DecisionPage() {
                                 <CheckIcon className="size-4" />
                               </Button>
                             ) : null}
-                            <Tooltip>
-                              <TooltipTrigger
-                                render={
-                                  <Button
-                                    size="icon-sm"
-                                    variant="outline"
-                                    disabled={Boolean(running) || savingPlatforms}
-                                    onClick={() => {
-                                      void showFile(job.file_path)
-                                    }}
-                                  />
-                                }
-                              >
-                                <Link2Icon className="size-4" />
-                              </TooltipTrigger>
-                              <TooltipContent>show the file</TooltipContent>
-                            </Tooltip>
+                            <ShowFileButton
+                              disabled={Boolean(running) || savingPlatforms}
+                              onShowFile={() => {
+                                void showFile(job.file_path)
+                              }}
+                            />
                             <Button
                               size="sm"
                               variant="outline"
@@ -482,6 +514,17 @@ export function DecisionPage() {
             onShowFile={(job) => {
               void showFile(job.file_path)
             }}
+            onSchedulePreset={(job, preset) => {
+              void rescheduleFailedWithPreset(job, preset)
+            }}
+            onCustomSchedule={(job) => openCustomForm(job.id)}
+            onRemove={(job) => {
+              if (!window.confirm("Remove this failed job completely?")) return
+              void runAction(`remove:${job.id}`, async () => {
+                await unreadyJob(job.id)
+              })
+            }}
+            busyJobId={actionKey?.split(":")[1] ?? null}
           />
         </div>
       </div>
@@ -592,6 +635,10 @@ function canScheduleFromSuggestion(
 ): boolean {
   if (!job.run_at_utc) return false
   return selection.linkedin || selection.x
+}
+
+function isSupportedPlatform(value: string): value is "linkedin" | "x" {
+  return value === "linkedin" || value === "x"
 }
 
 function decisionStatusRank(status: string): number {

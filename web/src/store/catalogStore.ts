@@ -45,6 +45,14 @@ export type PublicationContext = {
   note: string | null
 }
 
+export type FailedJobDetails = {
+  id: string
+  platform: string | null
+  statusReason: string | null
+  attemptCount: number
+  attempts: PublishAttempt[]
+}
+
 type CatalogState = {
   roots: CatalogRoot[]
   readyByPath: Record<string, string | null>
@@ -68,8 +76,10 @@ type CatalogState = {
   selectedFileError: string | null
   selectedAttempts: PublishAttempt[]
   selectedPublication: PublicationContext | null
+  selectedFailedJob: FailedJobDetails | null
   setSelectedAttempts: (attempts: PublishAttempt[]) => void
   setSelectedPublication: (publication: PublicationContext | null) => void
+  setSelectedFailedJob: (job: FailedJobDetails | null) => void
   loadCatalog: () => Promise<void>
   selectFile: (path: string) => Promise<void>
   clearSelectedFile: () => void
@@ -105,9 +115,11 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
   selectedFileError: null,
   selectedAttempts: [],
   selectedPublication: null,
+  selectedFailedJob: null,
   setSelectedAttempts: (attempts) => set({ selectedAttempts: attempts }),
   setSelectedPublication: (publication) =>
     set({ selectedPublication: publication }),
+  setSelectedFailedJob: (job) => set({ selectedFailedJob: job }),
   loadCatalog: async () => {
     set({ loading: true, error: null })
     try {
@@ -174,6 +186,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedFileError: null,
       selectedAttempts: [],
       selectedPublication: null,
+      selectedFailedJob: null,
       selectedFileContent: "",
       selectedPublishText: "",
       selectedPreviewMedia: [],
@@ -273,6 +286,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedFileError: null,
       selectedAttempts: [],
       selectedPublication: null,
+      selectedFailedJob: null,
     })
     clearLastSelectedFilePath()
   },

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react"
-import { Link2Icon } from "lucide-react"
 import { toast } from "sonner"
 
 import {
@@ -16,7 +15,9 @@ import { useUiStore } from "@/store/uiStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScheduleControls } from "@/components/schedule-controls"
+import { ShowFileButton } from "@/components/show-file-button"
 import { PublishingCard } from "@/components/publishing-card"
+import { PlatformIcon } from "@/components/platform-icon"
 import {
   Dialog,
   DialogContent,
@@ -35,7 +36,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 export function ScheduledPage() {
   const [scheduledItems, setScheduledItems] = useState<JobItem[]>([])
@@ -232,7 +232,7 @@ export function ScheduledPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="secondary">{job.platform ?? "none"}</Badge>
+                      <PlatformIcon platform={job.platform} />
                     </TableCell>
                     <TableCell>
                       <ScheduleControls
@@ -252,23 +252,12 @@ export function ScheduledPage() {
                         className="flex items-center gap-2"
                         onClick={(event) => event.stopPropagation()}
                       >
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                size="icon-sm"
-                                variant="outline"
-                                disabled={Boolean(running)}
-                                onClick={() => {
-                                  void showFile(job.file_path)
-                                }}
-                              />
-                            }
-                          >
-                            <Link2Icon className="size-4" />
-                          </TooltipTrigger>
-                          <TooltipContent>show the file</TooltipContent>
-                        </Tooltip>
+                        <ShowFileButton
+                          disabled={Boolean(running)}
+                          onShowFile={() => {
+                            void showFile(job.file_path)
+                          }}
+                        />
                         <Button
                           size="sm"
                           variant="destructive"

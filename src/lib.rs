@@ -1415,7 +1415,7 @@ fn job_ready(args: JobReadyArgs, config: &RuntimeConfig) -> Result<Value, AppErr
 
 pub(crate) fn job_unready(args: JobIdArgs, config: &RuntimeConfig) -> Result<Value, AppError> {
     let mut conn = open_db(config)?;
-    let deleted = sql_query("DELETE FROM jobs WHERE id = ? AND status IN ('ready', 'blocked', 'canceled', 'disabled')")
+    let deleted = sql_query("DELETE FROM jobs WHERE id = ? AND status IN ('ready', 'blocked', 'canceled', 'disabled', 'failed')")
         .bind::<Text, _>(&args.id)
         .execute(&mut conn)
         .map_err(|err| AppError::Io {
@@ -1424,7 +1424,7 @@ pub(crate) fn job_unready(args: JobIdArgs, config: &RuntimeConfig) -> Result<Val
 
     if deleted == 0 {
         return Err(AppError::Validation {
-            message: "No removable job found. Only ready/blocked/canceled can be unready-removed."
+            message: "No removable job found. Only ready/blocked/canceled/disabled/failed can be removed."
                 .to_string(),
             suggestion: Some("Use job unschedule or job cancel first when status is scheduled.".to_string()),
             command: None,

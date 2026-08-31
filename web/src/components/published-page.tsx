@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
-import { Link2Icon } from "lucide-react"
-
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ShowFileButton } from "@/components/show-file-button"
 import {
   Table,
   TableBody,
@@ -15,7 +14,7 @@ import { fileNameFromPath } from "@/lib/catalogPath"
 import { listJobAttempts, listPublishedJobs, type JobItem } from "@/lib/jobsApi"
 import { useCatalogStore } from "@/store/catalogStore"
 import { useUiStore } from "@/store/uiStore"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { PlatformIcon } from "@/components/platform-icon"
 
 export function PublishedPage() {
   const [items, setItems] = useState<JobItem[]>([])
@@ -147,7 +146,7 @@ export function PublishedPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant="secondary">{job.platform ?? "none"}</Badge>
+                    <PlatformIcon platform={job.platform} />
                   </TableCell>
                   <TableCell>
                     {job.published_at
@@ -156,22 +155,11 @@ export function PublishedPage() {
                   </TableCell>
                   <TableCell>
                     <div onClick={(event) => event.stopPropagation()}>
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <Button
-                              size="icon-sm"
-                              variant="outline"
-                              onClick={() => {
-                                void showFile(job)
-                              }}
-                            />
-                          }
-                        >
-                          <Link2Icon className="size-4" />
-                        </TooltipTrigger>
-                        <TooltipContent>show the file</TooltipContent>
-                      </Tooltip>
+                      <ShowFileButton
+                        onShowFile={() => {
+                          void showFile(job)
+                        }}
+                      />
                     </div>
                   </TableCell>
                 </TableRow>

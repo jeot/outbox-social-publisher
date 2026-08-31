@@ -1,7 +1,6 @@
-import { Link2Icon } from "lucide-react"
-
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { ShowFileButton } from "@/components/show-file-button"
+import { PlatformIcon } from "@/components/platform-icon"
 import { StatusBadge } from "@/components/status-badge"
 import {
   Card,
@@ -20,7 +19,6 @@ import {
 } from "@/components/ui/table"
 import { fileNameFromPath } from "@/lib/catalogPath"
 import { type JobItem } from "@/lib/jobsApi"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 type PublishingCardProps = {
   items: JobItem[]
@@ -67,26 +65,13 @@ export function PublishingCard({
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="secondary">{job.platform ?? "none"}</Badge>
+                  <PlatformIcon platform={job.platform} />
                 </TableCell>
                 <TableCell>
                   <StatusBadge status="publishing" />
                 </TableCell>
                 <TableCell>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <Button
-                          size="icon-sm"
-                          variant="outline"
-                          onClick={() => onShowFile(job)}
-                        />
-                      }
-                    >
-                      <Link2Icon className="size-4" />
-                    </TooltipTrigger>
-                    <TooltipContent>show the file</TooltipContent>
-                  </Tooltip>
+                  <ShowFileButton onShowFile={() => onShowFile(job)} />
                 </TableCell>
               </TableRow>
             ))}

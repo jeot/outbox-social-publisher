@@ -1,8 +1,10 @@
-import { Link2Icon } from "lucide-react"
-
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ShowFileButton } from "@/components/show-file-button"
+import { PlatformIcon } from "@/components/platform-icon"
 import { StatusBadge } from "@/components/status-badge"
+import { ScheduleControls } from "@/components/schedule-controls"
+import { SCHEDULE_PRESETS, type SchedulePreset } from "@/lib/schedulePresets"
 import {
   Table,
   TableBody,
@@ -13,13 +15,16 @@ import {
 } from "@/components/ui/table"
 import { fileNameFromPath } from "@/lib/catalogPath"
 import { type JobItem } from "@/lib/jobsApi"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 type FailedJobsTableProps = {
   items: JobItem[]
   selectedRowId: string | null
   onSelect: (job: JobItem) => void
   onShowFile: (job: JobItem) => void
+  onSchedulePreset: (job: JobItem, preset: SchedulePreset) => void
+  onCustomSchedule: (job: JobItem) => void
+  onRemove: (job: JobItem) => void
+  busyJobId: string | null
 }
 
 export function FailedJobsTable({
@@ -27,6 +32,10 @@ export function FailedJobsTable({
   selectedRowId,
   onSelect,
   onShowFile,
+  onSchedulePreset,
+  onCustomSchedule,
+  onRemove,
+  busyJobId,
 }: FailedJobsTableProps) {
   if (items.length === 0) return null
 
@@ -42,7 +51,7 @@ export function FailedJobsTable({
           <TableRow>
             <TableHead className="w-[15rem] min-w-[15rem]">File</TableHead>
             <TableHead>Platform</TableHead>
-            <TableHead>Reason</TableHead>
+            <TableHead>Schedule</TableHead>
             <TableHead>Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -65,27 +74,31 @@ export function FailedJobsTable({
                 </div>
               </TableCell>
               <TableCell>
-                <Badge variant="secondary">{job.platform ?? "none"}</Badge>
-              </TableCell>
-              <TableCell className="text-sm text-destructive">
-                {job.status_reason ?? "Provider publish failed."}
+                <PlatformIcon platform={job.platform} />
               </TableCell>
               <TableCell>
-                <div onClick={(event) => event.stopPropagation()}>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <Button
-                          size="icon-sm"
-                          variant="outline"
-                          onClick={() => onShowFile(job)}
-                        />
-                      }
-                    >
-                      <Link2Icon className="size-4" />
-                    </TooltipTrigger>
-                    <TooltipContent>show the file</TooltipContent>
-                  </Tooltip>
+                <ScheduleControls
+                  presets={SCHEDULE_PRESETS}
+                  disabled={busyJobId === job.id}
+                  customLabel="Custom"
+                  onPresetSelect={(preset) => onSchedulePreset(job, preset)}
+                  onCustomClick={() => onCustomSchedule(job)}
+                />
+              </TableCell>
+              <TableCell>
+                <div
+                  className="flex flex-wrap items-center gap-2"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <ShowFileButton onShowFile={() => onShowFile(job)} />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busyJobId === job.id}
+                    onClick={() => onRemove(job)}
+                  >
+                    Remove
+                  </Button>
                 </div>
               </TableCell>
             </TableRow>
