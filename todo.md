@@ -135,7 +135,42 @@ Implement scheduled execution and attempt tracking on top of existing job lifecy
 - [ ] Extend audit logging coverage to scheduled worker attempts and retries.
 - [ ] Add OS integration docs for background service mode (`launchd`, `systemd`, Task Scheduler).
 
-## Phase 8 - Advanced Local GUI (List + Calendar + Actions)
+## Phase 8 - Substack Notes MVP
+
+Add Substack Notes publishing for text-only and image-supported notes through a
+testable CLI path, using a maintained third-party community integration because
+Substack Notes does not provide the OAuth registration flow used by LinkedIn and X.
+
+- [x] Evaluate and choose a maintained community project that uses the unofficial Substack Notes APIs.
+- [x] Document the required non-OAuth authentication/session setup and its security implications.
+- [x] Implement a Substack Notes adapter behind the shared publisher interface.
+- [x] Add `publo publish substack --file <path>` command path for Notes only; explicitly exclude articles.
+- [x] Support text-only Notes publishing.
+- [x] Support Notes publishing with and without images using the existing file/media parsing contract.
+- [x] Add Substack Notes preflight validation and clear provider/auth failure messages.
+- [x] Add deterministic CLI tests for text-only, image, missing-image, and authentication failure cases.
+- [x] Complete a supervised live text-Note publish and verify the returned Note on the Substack feed.
+- [ ] Complete a supervised live image-Note publish and verify its text, image, and returned URL.
+
+## Phase 9 - Substack Scheduling + Worker Integration
+
+Extend the verified Substack Notes CLI adapter into the persisted scheduling and
+supervised worker pipeline. This phase remains planning-only until implementation
+is explicitly approved.
+
+- [ ] Audit existing database constraints and application validation for Substack platform values.
+- [ ] Preserve `migrations/0001_init`; add a new numbered forward migration only if the schema must change.
+- [ ] Add migration tests that start from an existing populated database and preserve jobs and attempt history.
+- [ ] Add `substack` to job CLI, API, scheduling, filtering, and Decision Queue platform selection.
+- [ ] Add Substack-specific schedule-time and execution-time preflight using the existing session, text, and image validation.
+- [ ] Dispatch Substack jobs through the existing Notes adapter from `publo worker run`.
+- [ ] Reuse atomic claim, immutable attempt, duplicate guard, success/failure, and uncertain-outcome semantics.
+- [ ] Add deterministic worker tests for Substack text success, image success, auth failure, provider failure, and interrupted requests.
+- [ ] Verify `publo worker run --dry-run --once` with a due Substack Note without network publishing or state changes.
+- [ ] Complete one supervised `publo worker run --live --once` text Note and verify the DB job, attempt, and returned URL.
+- [ ] Complete one supervised `publo worker run --live --once` image Note before considering Phase 9 complete.
+
+## Phase 10 - Advanced Local GUI (List + Calendar + Actions)
 
 Expand GUI after worker behavior is available.
 
@@ -146,7 +181,7 @@ Expand GUI after worker behavior is available.
 - [ ] Add filters by platform/status/date.
 - [ ] Keep GUI as interface layer; keep publish/schedule logic in Rust core.
 
-## Phase 9 - Remote Worker + Sync (Optional)
+## Phase 11 - Remote Worker + Sync (Optional)
 
 Allow always-on publishing even when laptop is offline by separating authoring location from worker runtime.
 
@@ -157,22 +192,17 @@ Allow always-on publishing even when laptop is offline by separating authoring l
 - [ ] Add result/status sync back to local machine and GUI.
 - [ ] Document offline behavior and recovery guarantees.
 
-## Phase 10 - Platform Expansion (Substack, Instagram)
+## Phase 12 - Platform Expansion (Instagram)
 
 Expand platform coverage using the same publish pipeline and scheduler architecture.
 
-- [ ] Evaluate and choose Substack integration strategy (official path or maintained community integration).
-- [ ] Implement Substack adapter behind shared publisher interface.
-- [ ] Add `publo publish substack --file <path>` command path.
-- [ ] Add scheduler integration for Substack with clear failure handling.
-- [ ] Isolate Substack-specific dependency and fallback path in docs.
 - [ ] Implement Instagram adapter behind shared publisher interface.
 - [ ] Add media validation requirements (image/video format and size checks).
 - [ ] Add `publo publish instagram --file <path> --media <path>` command path.
 - [ ] Add scheduler integration for Instagram and independent failure handling.
 - [ ] Add platform-specific preflight checks before scheduling.
 
-## Phase 11 - Public Distribution (Optional, End-Stage)
+## Phase 13 - Public Distribution (Optional, End-Stage)
 
 Package Publo for external developers with reproducible builds and release hygiene.
 

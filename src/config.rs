@@ -73,6 +73,7 @@ struct SignatureConfigFile {
 struct PlatformConfig {
     linkedin: Option<PlatformEntryConfig>,
     x: Option<PlatformEntryConfig>,
+    substack: Option<PlatformEntryConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +132,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) global_signature: SignatureLayer,
     pub(crate) linkedin_signature: SignatureLayer,
     pub(crate) x_signature: SignatureLayer,
+    pub(crate) substack_signature: SignatureLayer,
     pub(crate) media_lookup_paths: Vec<PathBuf>,
     pub(crate) db_path: PathBuf,
     pub(crate) api_host: String,
@@ -157,6 +159,10 @@ pub(crate) fn load_config() -> Result<RuntimeConfig, AppError> {
             text: None,
         },
         x_signature: SignatureLayer {
+            enabled: None,
+            text: None,
+        },
+        substack_signature: SignatureLayer {
             enabled: None,
             text: None,
         },
@@ -241,6 +247,13 @@ pub(crate) fn load_config() -> Result<RuntimeConfig, AppError> {
             .as_ref()
             .and_then(|cfg| cfg.platform.as_ref())
             .and_then(|p| p.x.as_ref())
+            .and_then(|p| p.signature.as_ref()),
+    );
+    let substack_signature = to_signature_layer(
+        workspace_config
+            .as_ref()
+            .and_then(|cfg| cfg.platform.as_ref())
+            .and_then(|p| p.substack.as_ref())
             .and_then(|p| p.signature.as_ref()),
     );
 
@@ -332,6 +345,7 @@ pub(crate) fn load_config() -> Result<RuntimeConfig, AppError> {
         global_signature,
         linkedin_signature,
         x_signature,
+        substack_signature,
         media_lookup_paths,
         db_path,
         api_host,

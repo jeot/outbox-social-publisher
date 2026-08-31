@@ -49,6 +49,10 @@ You: "Publo, what am I publishing tomorrow?"
 Publo: "LinkedIn at 10:00 and X at 15:00."
 ```
 
+The current Substack milestone validates this direction: Publo can publish a text
+Note directly from a local file through a supervised CLI action. Image Notes are
+implemented and remain subject to a supervised live check before worker automation.
+
 ## Local-first philosophy (long-term)
 
 User files remain user-owned:
@@ -106,3 +110,5 @@ Current direction:
 - AI-assisted workflows can prepare and verify, but publish only with deliberate authorization
 - automatic execution is introduced through a supervised real-content pilot before a continuous worker is enabled
 - an uncertain publish after a crash is surfaced for human review rather than retried automatically
+- unofficial integrations graduate from supervised CLI use to scheduling only after live validation
+- persisted behavior evolves through forward migrations; applied migrations are never rewritten

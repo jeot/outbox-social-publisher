@@ -37,17 +37,19 @@ mod db;
 mod errors;
 mod jobs;
 mod publish;
+mod substack;
 mod util;
 
 const DEFAULT_X_SCOPES: &str = "tweet.read tweet.write users.read media.write offline.access";
 
-use auth::{env_non_empty, load_linkedin_auth, load_x_auth};
+use auth::{env_non_empty, load_linkedin_auth, load_substack_auth, load_x_auth};
 use cli::*;
 use config::{RuntimeConfig, load_config};
 #[cfg(test)]
 use config::{RuntimePaths, SignatureLayer};
 use db::{ensure_db_ready, open_db};
 use errors::AppError;
+use substack::{SubstackClient, build_note_body, note_payload_preview};
 use util::json::print_json;
 
 #[derive(Debug, Serialize)]
@@ -342,6 +344,7 @@ pub async fn run() -> ExitCode {
         Commands::Publish(publish) => match publish.platform {
             PublishPlatform::Linkedin(args) => publish_linkedin_cli(args, &config).await,
             PublishPlatform::X(args) => publish_x_cli(args, &config).await,
+            PublishPlatform::Substack(args) => publish_substack_cli(args, &config).await,
         },
         Commands::Job(job) => match job.command {
             JobCommand::Ready(args) => job_ready(args, &config),
@@ -378,6 +381,11 @@ pub async fn run() -> ExitCode {
                 AuthXCommand::Exchange(args) => exchange_x_code_manual(args, &config).await,
                 AuthXCommand::TokenStatus => show_x_token_status(),
                 AuthXCommand::TokenRefresh => run_x_token_refresh(&config).await,
+            },
+            AuthPlatform::Substack(args) => match args.command {
+                AuthSubstackCommand::Guide => show_substack_auth_guide(&config),
+                AuthSubstackCommand::SessionStatus => show_substack_session_status(&config),
+                AuthSubstackCommand::Whoami => substack_whoami(&config).await,
             },
         },
         Commands::Serve(_) => unreachable!("serve command handled before standard JSON dispatch"),
@@ -4424,6 +4432,204 @@ async fn publish_x(args: PublishXArgs, config: &RuntimeConfig) -> Result<Value, 
     Ok(value)
 }
 
+fn show_substack_auth_guide(config: &RuntimeConfig) -> Result<Value, AppError> {
+    Ok(json!({
+        "ok": true,
+        "mode": "auth_guide",
+        "platform": "substack",
+        "env_path": config.paths.env_path.display().to_string(),
+        "steps": [
+            "Sign in to https://substack.com in a browser.",
+            "Open browser DevTools, then Application/Storage > Cookies > https://substack.com.",
+            "Copy only the value of the substack.sid cookie.",
+            "Set SUBSTACK_SESSION_TOKEN to that value in the workspace .env file.",
+            "Set SUBSTACK_PUBLICATION_URL to your HTTPS publication URL.",
+            "Run publo auth substack whoami to verify the session."
+        ],
+        "required_env": ["SUBSTACK_SESSION_TOKEN", "SUBSTACK_PUBLICATION_URL"],
+        "security": {
+            "treat_session_as_password": true,
+            "never_pass_on_command_line": true,
+            "never_commit_env_file": true
+        },
+        "next": {
+            "command": "publo auth substack session-status"
+        }
+    }))
+}
+
+fn show_substack_session_status(config: &RuntimeConfig) -> Result<Value, AppError> {
+    let auth = load_substack_auth()?;
+    Ok(json!({
+        "ok": true,
+        "mode": "auth_session_status",
+        "platform": "substack",
+        "session_present": true,
+        "session_value": "<redacted>",
+        "cookie_name": "substack.sid",
+        "publication_url": auth.publication_url.as_str(),
+        "env_path": config.paths.env_path.display().to_string(),
+        "next": {
+            "command": "publo auth substack whoami"
+        }
+    }))
+}
+
+async fn substack_whoami(config: &RuntimeConfig) -> Result<Value, AppError> {
+    let auth = load_substack_auth()?;
+    let client = SubstackClient::new(
+        &auth,
+        config.connect_timeout,
+        config.request_timeout,
+    )?;
+    let profile = client.get_authenticated_profile().await?;
+    Ok(json!({
+        "ok": true,
+        "mode": "auth_whoami",
+        "platform": "substack",
+        "authenticated": true,
+        "profile_id": profile.id,
+        "handle": profile.handle,
+        "name": profile.name,
+        "publication_url": auth.publication_url.as_str(),
+        "next": {
+            "command": "publo publish substack --file <path> --debug"
+        }
+    }))
+}
+
+async fn publish_substack_cli(
+    args: PublishSubstackArgs,
+    config: &RuntimeConfig,
+) -> Result<Value, AppError> {
+    if !args.debug {
+        validate_publish_pass(args.pass.as_deref(), config)?;
+    }
+    publish_substack(args, config).await
+}
+
+async fn publish_substack(
+    args: PublishSubstackArgs,
+    config: &RuntimeConfig,
+) -> Result<Value, AppError> {
+    if !args.file.exists() {
+        return Err(AppError::Validation {
+            message: format!("Content file does not exist: {}", args.file.display()),
+            suggestion: Some("Check the file path and run the same command again.".to_string()),
+            command: None,
+        });
+    }
+
+    let parsed = parse_post_input(&args.file, config)?;
+    let mut text = parsed.publish_text;
+    let signature_override = signature_cli_override(args.add_signature, args.no_signature);
+    let mut signature_applied = false;
+    if let Some(signature) = resolve_signature_text(
+        config,
+        PublishPlatformKind::Substack,
+        signature_override,
+    )? {
+        text.push_str(&signature);
+        signature_applied = true;
+    }
+    let body_json = build_note_body(&text)?;
+    let auth = load_substack_auth()?;
+    let author_key = auth.publication_url.as_str().trim_end_matches('/').to_string();
+    let media_sha = compute_media_signature(&parsed.media_paths)?;
+    let fingerprint_source = combine_text_and_media_for_fingerprint(&text, &media_sha);
+    let file_sha256 = parsed.file_sha256;
+    let text_sha256 = compute_content_sha256(text.as_bytes());
+    let fingerprint = compute_fingerprint("substack", &author_key, &fingerprint_source);
+    maybe_block_duplicate(
+        "substack",
+        &author_key,
+        &fingerprint,
+        &file_sha256,
+        args.allow_duplicate,
+    )?;
+
+    if args.debug {
+        return Ok(json!({
+            "ok": true,
+            "platform": "substack",
+            "content_type": "note",
+            "mode": "debug",
+            "would_publish": true,
+            "signature_applied": signature_applied,
+            "media_count": parsed.media_paths.len(),
+            "media_paths": parsed.media_paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            "text": text,
+            "payload": note_payload_preview(body_json, parsed.media_paths.len()),
+            "fingerprint": fingerprint,
+            "file_sha256": file_sha256,
+            "text_sha256": text_sha256,
+            "duplicate_guard": if args.allow_duplicate { "bypassed" } else { "checked" },
+            "auth_present": true
+        }));
+    }
+
+    let request_timeout = args
+        .timeout_seconds
+        .map(Duration::from_secs)
+        .unwrap_or(config.request_timeout);
+    let client = SubstackClient::new(&auth, config.connect_timeout, request_timeout)?;
+    let profile = client.get_authenticated_profile().await?;
+    let mut attachment_ids = Vec::new();
+    for path in &parsed.media_paths {
+        let uploaded = client.upload_image(path).await?;
+        attachment_ids.push(client.create_image_attachment(&uploaded).await?);
+    }
+
+    let receipt = client.publish_note(body_json, attachment_ids.clone()).await?;
+    let post_id = receipt.id;
+    let post_url = post_id
+        .as_ref()
+        .map(|id| format!("https://substack.com/@{}/note/c-{id}", profile.handle));
+    let published_at = Utc::now().to_rfc3339();
+    let output = SuccessOutput {
+        ok: true,
+        platform: "substack",
+        post_id: post_id.clone(),
+        post_url: post_url.clone(),
+        request_id: receipt.request_id.clone(),
+        published_at: published_at.clone(),
+    };
+    let mut value = serde_json::to_value(output).map_err(|err| AppError::Io {
+        message: format!("Failed to serialize Substack success output: {err}"),
+    })?;
+    attach_publish_metadata(
+        &mut value,
+        &fingerprint,
+        &file_sha256,
+        &text_sha256,
+        !args.allow_duplicate,
+    );
+    if let Some(object) = value.as_object_mut() {
+        object.insert("content_type".to_string(), json!("note"));
+        object.insert("signature_applied".to_string(), json!(signature_applied));
+        object.insert("media_count".to_string(), json!(parsed.media_paths.len()));
+        object.insert("attachment_ids".to_string(), json!(attachment_ids));
+    }
+
+    append_publish_log(&PublishLogEntry {
+        platform: "substack".to_string(),
+        author_urn: profile
+            .id
+            .map(|id| format!("substack:{id}"))
+            .unwrap_or_else(|| format!("substack:@{}", profile.handle)),
+        file_path: args.file.display().to_string(),
+        fingerprint,
+        file_sha256,
+        text_sha256,
+        post_id,
+        post_url,
+        request_id: receipt.request_id,
+        published_at,
+    })?;
+
+    Ok(value)
+}
+
 fn is_generic_x_forbidden(api_error: Option<&Value>) -> bool {
     let Some(err) = api_error else {
         return false;
@@ -4497,6 +4703,7 @@ fn combine_text_and_media_for_fingerprint(text: &str, media_signature: &str) -> 
 enum PublishPlatformKind {
     Linkedin,
     X,
+    Substack,
 }
 
 fn signature_cli_override(add_signature: bool, no_signature: bool) -> Option<bool> {
@@ -4517,10 +4724,12 @@ fn resolve_signature_text(
     let platform_layer = match platform {
         PublishPlatformKind::Linkedin => &config.linkedin_signature,
         PublishPlatformKind::X => &config.x_signature,
+        PublishPlatformKind::Substack => &config.substack_signature,
     };
     let platform_name = match platform {
         PublishPlatformKind::Linkedin => "linkedin",
         PublishPlatformKind::X => "x",
+        PublishPlatformKind::Substack => "substack",
     };
 
     let enabled = cli_override_enabled
@@ -5197,6 +5406,7 @@ mod worker_tests {
             global_signature: SignatureLayer { enabled: None, text: None },
             linkedin_signature: SignatureLayer { enabled: None, text: None },
             x_signature: SignatureLayer { enabled: None, text: None },
+            substack_signature: SignatureLayer { enabled: None, text: None },
             media_lookup_paths: Vec::new(),
             db_path,
             api_host: "127.0.0.1".to_string(),

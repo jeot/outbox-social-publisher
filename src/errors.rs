@@ -138,7 +138,9 @@ impl AppError {
                     "existing_published_at": existing_published_at
                 })),
                 retryable: false,
-                suggestion: Some("Use --allow-duplicate to bypass duplicate guard intentionally.".to_string()),
+                suggestion: Some(
+                    "Use --allow-duplicate to bypass duplicate guard intentionally.".to_string(),
+                ),
                 command: None,
             },
         }
@@ -146,28 +148,37 @@ impl AppError {
 }
 
 fn http_error_suggestion(status: Option<u16>, api_error: Option<&Value>) -> String {
-    if let Some(err) = api_error {
-        if let Some(hint) = err.get("local_hint").and_then(|v| v.as_str()) {
-            if hint == "x_likely_over_length" {
-                let weighted = err
-                    .get("local_weighted_length")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                return format!(
-                    "X API returned generic forbidden, but local check indicates over length (weighted {} > 280). Shorten text and retry.",
-                    weighted
-                );
-            }
-            if hint == "x_likely_cashtag_limit" {
-                let count = err
-                    .get("local_cashtag_count")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                return format!(
-                    "X API returned generic forbidden, but local check indicates cashtag limit ({} found; API self-serve allows max 1). Reduce cashtags and retry.",
-                    count
-                );
-            }
+    if let Some(err) = api_error
+        && let Some(hint) = err.get("local_hint").and_then(|v| v.as_str())
+    {
+        if hint == "substack_session_invalid" {
+            return "The Substack browser session is invalid or expired. Copy a fresh substack.sid cookie value into SUBSTACK_SESSION_TOKEN, then run `publo auth substack whoami`.".to_string();
+        }
+        if hint == "substack_publish_outcome_unknown" {
+            return "The Substack Note may have been published even though Publo did not receive a response. Check your Substack profile before retrying.".to_string();
+        }
+        if hint == "substack_publish_forbidden" {
+            return "Substack rejected the Note request before publishing it. Confirm `publo auth substack whoami` still succeeds; if it does, refresh the substack.sid cookie and retry once.".to_string();
+        }
+        if hint == "x_likely_over_length" {
+            let weighted = err
+                .get("local_weighted_length")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            return format!(
+                "X API returned generic forbidden, but local check indicates over length (weighted {} > 280). Shorten text and retry.",
+                weighted
+            );
+        }
+        if hint == "x_likely_cashtag_limit" {
+            let count = err
+                .get("local_cashtag_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            return format!(
+                "X API returned generic forbidden, but local check indicates cashtag limit ({} found; API self-serve allows max 1). Reduce cashtags and retry.",
+                count
+            );
         }
     }
 
@@ -200,9 +211,7 @@ fn http_error_suggestion(status: Option<u16>, api_error: Option<&Value>) -> Stri
                 return "X API rejected the post due to cashtag limit (max 1 cashtag in API self-serve mode). Reduce cashtags to one and retry.".to_string();
             }
 
-            if detail.contains("too long")
-                || detail.contains("over 280")
-                || detail.contains("280")
+            if detail.contains("too long") || detail.contains("over 280") || detail.contains("280")
             {
                 return "X API rejected post length. Shorten text to fit API weighted 280-character rules, then retry.".to_string();
             }

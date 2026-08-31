@@ -9,11 +9,13 @@ Platform setup guides:
 
 - [docs/platforms/linkedin-setup.md](docs/platforms/linkedin-setup.md)
 - [docs/platforms/x-setup.md](docs/platforms/x-setup.md)
+- [docs/platforms/substack-setup.md](docs/platforms/substack-setup.md)
 
 ## Current status
 
 - LinkedIn: text + image + multi-image publishing
 - X: text + image publishing (up to 4 images)
+- Substack Notes: live-verified text publishing; image publishing implemented and awaiting a supervised live check
 - Guided OAuth login for both platforms
 - Manual OAuth exchange fallback for both platforms
 - Token status/refresh commands for both platforms
@@ -25,32 +27,33 @@ Platform setup guides:
 
 ## Feature matrix
 
-| Capability | LinkedIn | X |
-|---|---|---|
-| Text post | ✅ | ✅ |
-| Single image | ✅ | ✅ |
-| Multi-image | ✅ (2-20) | ✅ (1-4) |
-| Guided OAuth callback login | ✅ | ✅ |
-| Manual OAuth exchange | ✅ | ✅ |
-| Token status | ✅ | ✅ |
-| Token refresh | ✅ | ✅ |
-| Auto refresh during publish on 401 | ✅ | ✅ |
-| Debug no-send mode (`--debug`) | ✅ | ✅ |
+| Capability | LinkedIn | X | Substack Notes |
+|---|---|---|---|
+| Text post | ✅ | ✅ | ✅ live-verified |
+| Single image | ✅ | ✅ | 🧪 implemented |
+| Multi-image | ✅ (2-20) | ✅ (1-4) | 🧪 implemented |
+| Guided OAuth callback login | ✅ | ✅ | N/A |
+| Manual OAuth exchange | ✅ | ✅ | N/A |
+| Auth/session status | ✅ | ✅ | ✅ |
+| Token refresh | ✅ | ✅ | Manual session replacement |
+| Auto refresh during publish on 401 | ✅ | ✅ | N/A |
+| Debug no-send mode (`--debug`) | ✅ | ✅ | ✅ |
 
 ## Prerequisites
 
 - Rust toolchain (`cargo`)
-- LinkedIn and/or X developer app
+- A LinkedIn/X developer app and/or an authenticated Substack browser session
 
 If you are running directly from source without installing the binary, prepend commands with `cargo run --`  
 (example: `cargo run -- auth x login`).
 
 ## Quick start
 
-1. Copy env template:
+1. Initialize or inspect the active workspace, then edit the reported `env_path`:
 
 ```bash
-cp .env.example .env
+publo init
+publo paths
 ```
 
 2. Configure readable JSON + local media lookup in `config.toml`:
@@ -68,6 +71,7 @@ lookup_paths = ["/absolute/path/to/media-assets"]
 ```bash
 publo auth linkedin login
 publo auth x login
+publo auth substack whoami
 ```
 
 4. Validate without posting:
@@ -75,6 +79,7 @@ publo auth x login
 ```bash
 publo publish linkedin --file ./post.md --debug
 publo publish x --file ./post.md --debug
+publo publish substack --file ./note.md --debug
 ```
 
 5. Publish:
@@ -82,6 +87,7 @@ publo publish x --file ./post.md --debug
 ```bash
 publo publish linkedin --file ./post.md --pass <publish-pass>
 publo publish x --file ./post.md --pass <publish-pass>
+publo publish substack --file ./note.md --pass <publish-pass>
 ```
 
 ## Worker pilot
@@ -157,6 +163,10 @@ enabled = true
 enabled = false
 # text = "\n[Sent from publo]"
 
+[platform.substack.signature]
+enabled = false
+# text = "\n[Sent from publo]"
+
 [media]
 lookup_paths = ["/absolute/path/to/media-assets"]
 
@@ -201,6 +211,10 @@ X_ACCESS_TOKEN=
 X_REFRESH_TOKEN=
 X_ACCESS_TOKEN_EXPIRES_IN=
 X_TOKEN_TYPE=
+
+# Substack Notes browser-session authentication
+SUBSTACK_SESSION_TOKEN=
+SUBSTACK_PUBLICATION_URL=https://yourname.substack.com
 ```
 
 ## LinkedIn setup
@@ -242,6 +256,47 @@ Image limits:
 - single image: supported
 - multi-image: supported, max 20
 - allowed extensions: `.png`, `.jpg`, `.jpeg`
+
+## Substack Notes setup
+
+Substack Notes uses a manually copied browser session instead of OAuth. Configure
+`SUBSTACK_SESSION_TOKEN` with only the value of the `substack.sid` cookie and set
+`SUBSTACK_PUBLICATION_URL`. Treat the session value like a password.
+
+Auth commands:
+
+```bash
+publo auth substack guide
+publo auth substack session-status
+publo auth substack whoami
+```
+
+Publish Notes only—Substack articles are intentionally unsupported:
+
+```bash
+publo publish substack --file ./note.md --debug
+publo publish substack --file ./note.md --pass <publish-pass>
+```
+
+Options:
+
+- `--pass <publish-pass>` (required for real publish, optional with `--debug`)
+- `--allow-duplicate`
+- `--debug`
+- `--add-signature`
+- `--no-signature`
+
+Text-only and image Notes use the shared Obsidian parsing and media-resolution rules.
+Text-only publishing was verified against a real Substack feed on August 31, 2026.
+Image publishing is contract-tested but still requires its first supervised live verification.
+See [the setup guide](docs/platforms/substack-setup.md) and the
+[pinned unofficial API reference](docs/platforms/substack-unofficial-api-reference.md).
+
+Substack scheduling and `publo worker run` support are the next planned phase. The
+existing database stores platform names as text, but implementation must still audit
+all persistence and validation paths. Applied migrations are immutable: if a schema
+change is actually required, it must be introduced as a new numbered forward migration,
+with an upgrade test against an existing populated database.
 
 ## X setup
 

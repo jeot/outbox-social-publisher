@@ -65,6 +65,7 @@ pub(crate) struct PublishArgs {
 pub(crate) enum PublishPlatform {
     Linkedin(PublishLinkedinArgs),
     X(PublishXArgs),
+    Substack(PublishSubstackArgs),
 }
 
 #[derive(Debug, Args)]
@@ -110,6 +111,24 @@ pub(crate) struct PublishXArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct PublishSubstackArgs {
+    #[arg(long)]
+    pub(crate) file: PathBuf,
+    #[arg(long, required_unless_present = "debug")]
+    pub(crate) pass: Option<String>,
+    #[arg(long)]
+    pub(crate) timeout_seconds: Option<u64>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) allow_duplicate: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) debug: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "no_signature")]
+    pub(crate) add_signature: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "add_signature")]
+    pub(crate) no_signature: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct AuthArgs {
     #[command(subcommand)]
     pub(crate) platform: AuthPlatform,
@@ -119,6 +138,7 @@ pub(crate) struct AuthArgs {
 pub(crate) enum AuthPlatform {
     Linkedin(AuthLinkedinArgs),
     X(AuthXArgs),
+    Substack(AuthSubstackArgs),
 }
 
 #[derive(Debug, Args)]
@@ -350,6 +370,19 @@ pub(crate) enum AuthXCommand {
     Exchange(AuthXExchangeArgs),
     TokenStatus,
     TokenRefresh,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AuthSubstackArgs {
+    #[command(subcommand)]
+    pub(crate) command: AuthSubstackCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AuthSubstackCommand {
+    Guide,
+    SessionStatus,
+    Whoami,
 }
 
 #[derive(Debug, Args)]

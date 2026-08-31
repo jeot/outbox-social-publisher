@@ -25,7 +25,7 @@ The primary platforms are (in order of importance):
 
 LinkedIn, X, and Instagram should use their official APIs where practical.
 
-Substack is different. Its official API does not currently provide the same straightforward publishing capability as the other platforms, especially for Notes. It is acceptable to use a reliable community project or integration for Substack publishing if appropriate. This is a personal tool, so depending on a maintained community solution is acceptable, as long as the dependency is clearly isolated from the rest of the application.
+Substack is different. Its official API does not currently provide the same straightforward publishing capability as the other platforms, especially for Notes. Publo implements the observed Notes contract directly in Rust, informed by a pinned community SDK and independent request captures. The browser session cookie remains inside Publo; third-party runtime code is not entrusted with it. This unofficial adapter is isolated from the rest of the application and may need updates when Substack changes its web API.
 
 The system should not assume that every platform has identical capabilities.
 
@@ -216,7 +216,7 @@ A failed Instagram publication should not prevent an unrelated LinkedIn or X pub
 
 Direct CLI publish commands are external-entry critical actions.
 
-* `publo publish linkedin` and `publo publish x` require `--pass <publish-pass>` for real publish; `--debug` does not require password.
+* `publo publish linkedin`, `publo publish x`, and `publo publish substack` require `--pass <publish-pass>` for real publish; `--debug` does not require password.
 * expected value comes from config (`[security].publish_cli_password`).
 * invalid/missing password fails before real publish logic executes.
 * this gate is CLI-only; internal app/worker execution paths are not expected to depend on CLI flags.
@@ -243,6 +243,27 @@ must never mutate them.
 The future continuous loop should poll for due work once per minute, use the same one-job
 claim/execution path as live one-shot mode, process one claim at a time, and survive an
 individual database or provider failure without weakening duplicate protection.
+
+### Substack rollout boundary
+
+The Substack adapter currently supports immediate supervised CLI publishing. Text-only
+publishing has been verified on a real feed; image publishing is implemented and covered
+by mocked contract tests but awaits supervised live verification. Substack is not yet a
+valid scheduling or worker platform.
+
+The next implementation phase should extend the existing pipeline rather than create a
+parallel one:
+
+1. Audit job/API/UI platform validation and the persisted model for `substack`.
+2. Add scheduling and execution preflight for the browser session, Note length, and images.
+3. Route due Substack jobs through the same atomic one-job claim and attempt lifecycle.
+4. Preserve the no-automatic-retry rule whenever the provider outcome is uncertain.
+5. Validate dry-run, then one supervised text job, then one supervised image job.
+
+The initial schema stores platform names as text, so adding Substack may not require a
+schema change. Schema need must be established by the audit, not assumed. If a change is
+required, `migrations/0001_init` remains untouched and a new numbered forward migration
+must upgrade an existing populated database without losing jobs or attempt history.
 
 ## Human control
 

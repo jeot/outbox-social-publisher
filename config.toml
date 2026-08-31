@@ -26,5 +26,9 @@ enabled = false
 enabled = true
 text = "\n\n[Sent from publo, by Shamim.]"
 
+[platform.substack.signature]
+enabled = false
+# text = "\n\n[Sent from publo, by Shamim.]"
+
 [media]
 lookup_paths = ["/Users/shk/work/awesome/Files"]
