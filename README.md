@@ -13,9 +13,9 @@ Platform setup guides:
 
 ## Current status
 
-- LinkedIn: text + image + multi-image publishing
+- LinkedIn: text + image + multi-image + article link-preview publishing
 - X: text + image publishing (up to 4 images)
-- Substack Notes: live-verified text and image publishing
+- Substack Notes: live-verified text and image publishing; link attachments implemented
 - Guided OAuth login for both platforms
 - Manual OAuth exchange fallback for both platforms
 - Token status/refresh commands for both platforms
@@ -32,6 +32,7 @@ Platform setup guides:
 | Text post | ✅ | ✅ | ✅ live-verified |
 | Single image | ✅ | ✅ | ✅ live-verified |
 | Multi-image | ✅ (2-20) | ✅ (1-4) | 🧪 contract-tested |
+| Link preview | 🧪 implemented | URL in text | 🧪 implemented |
 | Guided OAuth callback login | ✅ | ✅ | N/A |
 | Manual OAuth exchange | ✅ | ✅ | N/A |
 | Auth/session status | ✅ | ✅ | ✅ |
@@ -244,6 +245,12 @@ Publish:
 publo publish linkedin --file ./post.md --pass <publish-pass>
 ```
 
+When publishable text contains an HTTP(S) URL and no native image, Publo uses the first
+URL to build an explicit LinkedIn article card. It reads Open Graph metadata and uploads
+the page image as the card thumbnail when available. Native images take precedence over
+the article card. Run the same command with `--debug` to inspect `link_preview` and the
+final planned `content.article` payload without publishing.
+
 Options:
 
 - `--pass <publish-pass>` (required for real publish, optional with `--debug`)
@@ -288,6 +295,9 @@ Options:
 - `--no-signature`
 
 Text-only and image Notes use the shared Obsidian parsing and media-resolution rules.
+The first HTTP(S) URL is also created as a Substack link attachment. Link and image
+attachments can coexist. `--debug` reports the detected URL and placeholder attachment
+ID without creating an attachment or publishing.
 Text-only publishing was verified against a real Substack feed on August 31, 2026.
 Image publishing was also verified against a real Substack feed on August 31, 2026.
 See [the setup guide](docs/platforms/substack-setup.md) and the

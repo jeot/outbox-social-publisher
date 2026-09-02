@@ -268,6 +268,19 @@ closed allowlist without modifying `0001_init`; its upgrade test verifies preser
 existing jobs and attempt history and accepts arbitrary future mode names. Publo does not
 maintain dual-schema read/write paths.
 
+### Link-preview pipeline
+
+Link previews are derived from the first valid HTTP(S) URL in publishable text, after the
+same content extraction used by immediate and worker publishing. The catalog API exposes
+that candidate to the GUI without mutating provider state.
+
+LinkedIn does not scrape commentary URLs submitted through the Posts API. When a post has
+no native media, Publo fetches the page metadata, builds explicit `content.article`
+fields, and uploads an Open Graph image as the thumbnail when present. Native LinkedIn
+media suppresses the article card. Substack creates a `type = "link"` Note attachment and
+includes its ID alongside image attachment IDs. Debug mode exposes these decisions and
+planned payloads without creating provider content.
+
 ## Human control
 
 The system should optimize for low friction, not maximum automation at any cost.

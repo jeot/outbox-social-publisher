@@ -36,6 +36,7 @@ mod config;
 mod db;
 mod errors;
 mod jobs;
+mod link_preview;
 mod publish;
 mod substack;
 mod util;
@@ -49,6 +50,9 @@ use config::{RuntimeConfig, load_config};
 use config::{RuntimePaths, SignatureLayer};
 use db::{ensure_db_ready, open_db};
 use errors::AppError;
+use link_preview::{
+    LinkMetadata, LinkPreviewState, detect_first_link, fetch_metadata, preview_state,
+};
 use substack::{SubstackClient, build_note_body, note_payload_preview};
 use util::json::print_json;
 
@@ -2663,6 +2667,7 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
                 parsed.publish_text
             };
             let commentary_escaped = escape_little_text_plain(&commentary_raw);
+            let link_preview = preview_state(&commentary_raw, !parsed.media_paths.is_empty());
             let text_sha256 = compute_content_sha256(commentary_raw.as_bytes());
             let fingerprint_source = combine_text_and_media_for_fingerprint(&commentary_raw, &media_sha);
             let fingerprint = compute_fingerprint("linkedin", &auth.author_urn, &fingerprint_source);
@@ -2676,6 +2681,7 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
                     "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                     "text": commentary_raw,
                     "commentary_escaped": commentary_escaped,
+                    "link_preview": link_preview,
                     "author": auth.author_urn
                 }),
             })
@@ -2738,6 +2744,8 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
                 parsed.publish_text
             };
             let body_json = build_note_body(&text)?;
+            let link_preview = preview_state(&text, false);
+            let has_link_preview = link_preview.status == "found";
             let text_sha256 = compute_content_sha256(text.as_bytes());
             let author_key = auth.publication_url.as_str().trim_end_matches('/');
             let fingerprint_source =
@@ -2754,7 +2762,8 @@ fn preflight_job(job: &JobRow, config: &RuntimeConfig) -> Result<JobPreflightRes
                     "media_count": parsed.media_paths.len(),
                     "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                     "text": text,
-                    "payload": note_payload_preview(body_json, parsed.media_paths.len()),
+                    "payload": note_payload_preview(body_json, parsed.media_paths.len(), has_link_preview),
+                    "link_preview": link_preview,
                     "publication_url": auth.publication_url.as_str()
                 }),
             })
@@ -3890,6 +3899,7 @@ async fn publish_linkedin(
     let file_sha256 = parsed.file_sha256;
     let text_sha256 = compute_content_sha256(commentary_raw.as_bytes());
     let fingerprint = compute_fingerprint("linkedin", &auth.author_urn, &fingerprint_source);
+    let link_preview = preview_state(&commentary_raw, !parsed.media_paths.is_empty());
     let mut payload = json!({
         "author": auth.author_urn,
         "commentary": commentary,
@@ -3903,6 +3913,27 @@ async fn publish_linkedin(
         "isReshareDisabledByAuthor": false
     });
 
+    let request_timeout = args
+        .timeout_seconds
+        .map(Duration::from_secs)
+        .unwrap_or(config.request_timeout);
+    let client = reqwest::Client::builder()
+        .connect_timeout(config.connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to build HTTP client: {err}"),
+            status: None,
+            api_error: None,
+            retryable: false,
+        })?;
+    let link_metadata = if link_preview.status == "found" {
+        let link = detect_first_link(&commentary_raw).expect("found link-preview URL");
+        Some(fetch_metadata(&client, &link).await?)
+    } else {
+        None
+    };
+
     maybe_block_duplicate(
         "linkedin",
         &auth.author_urn,
@@ -3912,7 +3943,21 @@ async fn publish_linkedin(
     )?;
 
     if args.debug {
-        let payload_preview = if parsed.media_paths.is_empty() {
+        let payload_preview = if let Some(metadata) = link_metadata.as_ref() {
+            let mut preview = payload.clone();
+            let thumbnail = metadata
+                .image_url
+                .as_ref()
+                .map(|_| "<resolved-via-linkedin-upload>");
+            preview
+                .as_object_mut()
+                .expect("payload object")
+                .insert(
+                    "content".to_string(),
+                    linkedin_article_content(metadata, thumbnail),
+                );
+            preview
+        } else if parsed.media_paths.is_empty() {
             payload.clone()
         } else if parsed.media_paths.len() == 1 {
             let mut preview = payload.clone();
@@ -3964,28 +4009,13 @@ async fn publish_linkedin(
             "media_paths": parsed.media_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "commentary_raw": commentary_raw,
             "commentary_escaped": commentary,
+            "link_preview": link_preview_output(&link_preview, link_metadata.as_ref(), "article"),
             "payload": payload_preview,
             "fingerprint": fingerprint,
             "file_sha256": file_sha256,
             "text_sha256": text_sha256
         }));
     }
-
-    let request_timeout = args
-        .timeout_seconds
-        .map(Duration::from_secs)
-        .unwrap_or(config.request_timeout);
-
-    let client = reqwest::Client::builder()
-        .connect_timeout(config.connect_timeout)
-        .timeout(request_timeout)
-        .build()
-        .map_err(|err| AppError::Http {
-            message: format!("Failed to build HTTP client: {err}"),
-            status: None,
-            api_error: None,
-            retryable: false,
-        })?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -4053,6 +4083,30 @@ async fn publish_linkedin(
             .as_object_mut()
             .expect("payload object")
             .insert("content".to_string(), content_value);
+    } else if let Some(metadata) = link_metadata.as_ref() {
+        let thumbnail_urn = if let Some(image_url) = metadata.image_url.as_ref() {
+            let (bytes, content_type) = download_link_preview_image(&client, image_url).await?;
+            Some(
+                linkedin_upload_image_bytes(
+                    &client,
+                    &auth.access_token,
+                    &auth.version,
+                    &auth.author_urn,
+                    bytes,
+                    &content_type,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        payload
+            .as_object_mut()
+            .expect("payload object")
+            .insert(
+                "content".to_string(),
+                linkedin_article_content(metadata, thumbnail_urn.as_deref()),
+            );
     }
 
     let mut response = response
@@ -4147,6 +4201,10 @@ async fn publish_linkedin(
         obj.insert("signature_applied".to_string(), json!(signature_applied));
         obj.insert("media_count".to_string(), json!(parsed.media_paths.len()));
         obj.insert("media_urns".to_string(), json!(media_urns));
+        obj.insert(
+            "link_preview".to_string(),
+            link_preview_output(&link_preview, link_metadata.as_ref(), "article"),
+        );
     }
     attach_publish_metadata(&mut value, &fingerprint, &file_sha256, &text_sha256, true);
 
@@ -4588,6 +4646,8 @@ async fn publish_substack(
         signature_applied = true;
     }
     let body_json = build_note_body(&text)?;
+    let link_preview = preview_state(&text, false);
+    let preview_link = detect_first_link(&text);
     let auth = load_substack_auth()?;
     let author_key = auth.publication_url.as_str().trim_end_matches('/').to_string();
     let media_sha = compute_media_signature(&parsed.media_paths)?;
@@ -4614,7 +4674,8 @@ async fn publish_substack(
             "media_count": parsed.media_paths.len(),
             "media_paths": parsed.media_paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
             "text": text,
-            "payload": note_payload_preview(body_json, parsed.media_paths.len()),
+            "payload": note_payload_preview(body_json, parsed.media_paths.len(), preview_link.is_some()),
+            "link_preview": link_preview_output(&link_preview, None, "link_attachment"),
             "fingerprint": fingerprint,
             "file_sha256": file_sha256,
             "text_sha256": text_sha256,
@@ -4633,6 +4694,9 @@ async fn publish_substack(
     for path in &parsed.media_paths {
         let uploaded = client.upload_image(path).await?;
         attachment_ids.push(client.create_image_attachment(&uploaded).await?);
+    }
+    if let Some(url) = preview_link.as_ref() {
+        attachment_ids.push(client.create_link_attachment(url).await?);
     }
 
     let receipt = client.publish_note(body_json, attachment_ids.clone()).await?;
@@ -4664,6 +4728,10 @@ async fn publish_substack(
         object.insert("signature_applied".to_string(), json!(signature_applied));
         object.insert("media_count".to_string(), json!(parsed.media_paths.len()));
         object.insert("attachment_ids".to_string(), json!(attachment_ids));
+        object.insert(
+            "link_preview".to_string(),
+            link_preview_output(&link_preview, None, "link_attachment"),
+        );
     }
 
     append_publish_log(&PublishLogEntry {
@@ -5068,6 +5136,29 @@ async fn linkedin_upload_image(
     owner_urn: &str,
     image_path: &PathBuf,
 ) -> Result<String, AppError> {
+    let image_bytes = fs::read(image_path).map_err(|err| AppError::Io {
+        message: format!("Failed to read image '{}': {err}", image_path.display()),
+    })?;
+    let content_type = media_content_type(image_path)?;
+    linkedin_upload_image_bytes(
+        client,
+        access_token,
+        linkedin_version,
+        owner_urn,
+        image_bytes,
+        content_type,
+    )
+    .await
+}
+
+async fn linkedin_upload_image_bytes(
+    client: &reqwest::Client,
+    access_token: &str,
+    linkedin_version: &str,
+    owner_urn: &str,
+    image_bytes: Vec<u8>,
+    content_type: &str,
+) -> Result<String, AppError> {
     let init_response = client
         .post("https://api.linkedin.com/rest/images?action=initializeUpload")
         .header(AUTHORIZATION, format!("Bearer {}", access_token))
@@ -5109,11 +5200,6 @@ async fn linkedin_upload_image(
             retryable: false,
         })?;
 
-    let image_bytes = fs::read(image_path).map_err(|err| AppError::Io {
-        message: format!("Failed to read image '{}': {err}", image_path.display()),
-    })?;
-    let content_type = media_content_type(image_path)?;
-
     let upload_response = client
         .put(&init_body.value.upload_url)
         .header(AUTHORIZATION, format!("Bearer {}", access_token))
@@ -5140,6 +5226,94 @@ async fn linkedin_upload_image(
     }
 
     Ok(init_body.value.image)
+}
+
+fn linkedin_article_content(metadata: &LinkMetadata, thumbnail_urn: Option<&str>) -> Value {
+    let mut article = json!({
+        "source": metadata.url,
+        "title": metadata.title,
+    });
+    if let Some(description) = metadata.description.as_ref() {
+        article
+            .as_object_mut()
+            .expect("article payload object")
+            .insert("description".to_string(), json!(description));
+    }
+    if let Some(thumbnail) = thumbnail_urn {
+        article
+            .as_object_mut()
+            .expect("article payload object")
+            .insert("thumbnail".to_string(), json!(thumbnail));
+    }
+    json!({ "article": article })
+}
+
+fn link_preview_output(
+    state: &LinkPreviewState,
+    metadata: Option<&LinkMetadata>,
+    publish_as: &str,
+) -> Value {
+    let mut output = serde_json::to_value(state).expect("serialize link-preview state");
+    let object = output.as_object_mut().expect("link-preview state object");
+    object.insert("publish_as".to_string(), json!(publish_as));
+    if let Some(metadata) = metadata {
+        object.insert("title".to_string(), json!(metadata.title));
+        object.insert("description".to_string(), json!(metadata.description));
+        object.insert("thumbnail_url".to_string(), json!(metadata.image_url));
+    }
+    output
+}
+
+async fn download_link_preview_image(
+    client: &reqwest::Client,
+    image_url: &str,
+) -> Result<(Vec<u8>, String), AppError> {
+    let response = client
+        .get(image_url)
+        .send()
+        .await
+        .map_err(|err| AppError::Http {
+            message: format!("Failed to download link-preview thumbnail: {err}"),
+            status: None,
+            api_error: None,
+            retryable: err.is_timeout() || err.is_connect(),
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::Http {
+            message: format!("Link-preview thumbnail returned {}", status.as_u16()),
+            status: Some(status.as_u16()),
+            api_error: None,
+            retryable: status.is_server_error() || status.as_u16() == 429,
+        });
+    }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| value.starts_with("image/"))
+        .ok_or_else(|| AppError::Validation {
+            message: "Link-preview thumbnail response is not an image.".to_string(),
+            suggestion: Some("Use an article with a valid Open Graph image.".to_string()),
+            command: None,
+        })?
+        .to_string();
+    let bytes = response.bytes().await.map_err(|err| AppError::Http {
+        message: format!("Failed to read link-preview thumbnail: {err}"),
+        status: Some(status.as_u16()),
+        api_error: None,
+        retryable: false,
+    })?;
+    if bytes.len() > 20 * 1024 * 1024 {
+        return Err(AppError::Validation {
+            message: "Link-preview thumbnail exceeds the 20 MiB safety limit.".to_string(),
+            suggestion: Some("Use a smaller Open Graph image.".to_string()),
+            command: None,
+        });
+    }
+    Ok((bytes.to_vec(), content_type))
 }
 
 async fn x_upload_media_image(
@@ -5422,6 +5596,22 @@ fn format_env_value(value: &str) -> String {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn linkedin_article_payload_contains_explicit_preview_fields() {
+        let metadata = LinkMetadata {
+            url: "https://writer.substack.com/p/article".to_string(),
+            domain: "writer.substack.com".to_string(),
+            title: "Article title".to_string(),
+            description: Some("Article description".to_string()),
+            image_url: Some("https://writer.substack.com/cover.png".to_string()),
+        };
+        let content = linkedin_article_content(&metadata, Some("urn:li:image:preview"));
+        assert_eq!(content["article"]["source"], metadata.url);
+        assert_eq!(content["article"]["title"], metadata.title);
+        assert_eq!(content["article"]["description"], "Article description");
+        assert_eq!(content["article"]["thumbnail"], "urn:li:image:preview");
+    }
 
     struct TestWorkspace {
         root: PathBuf,

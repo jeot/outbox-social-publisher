@@ -22,6 +22,17 @@ export type MediaPreview = {
   error: string | null
 }
 
+export type LinkPreview = {
+  status: "found" | "not_found" | "suppressed_by_media"
+  url: string | null
+  domain: string | null
+  reason: string | null
+  title?: string | null
+  description?: string | null
+  thumbnail_url?: string | null
+  metadata_error?: string | null
+}
+
 export type CatalogJobBadge = {
   status: string
   platform: string | null
@@ -70,6 +81,8 @@ type CatalogState = {
   selectedFileContent: string
   selectedPublishText: string
   selectedPreviewMedia: MediaPreview[]
+  selectedPreviewLink: LinkPreview | null
+  selectedPreviewLinkLoading: boolean
   selectedPreviewIssues: string[]
   selectedPreviewPublishable: boolean
   selectedFileLoading: boolean
@@ -109,6 +122,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
   selectedFileContent: "",
   selectedPublishText: "",
   selectedPreviewMedia: [],
+  selectedPreviewLink: null,
+  selectedPreviewLinkLoading: false,
   selectedPreviewIssues: [],
   selectedPreviewPublishable: false,
   selectedFileLoading: false,
@@ -190,6 +205,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedFileContent: "",
       selectedPublishText: "",
       selectedPreviewMedia: [],
+      selectedPreviewLink: null,
+      selectedPreviewLinkLoading: false,
       selectedPreviewIssues: [],
       selectedPreviewPublishable: false,
       selectedFileReady: false,
@@ -225,11 +242,15 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
         typeof ready.operator === "string" && ready.operator.length > 0
           ? ready.operator
           : null
+      const linkPreview = preview.link_preview ?? null
+      const linkPreviewLoading = linkPreview?.status === "found" && Boolean(linkPreview.url)
       set({
         selectedFilePath: resolvedPath,
         selectedFileContent: data.content ?? "",
         selectedPublishText: preview.publish_text ?? "",
         selectedPreviewMedia: preview.media ?? [],
+        selectedPreviewLink: linkPreview,
+        selectedPreviewLinkLoading: linkPreviewLoading,
         selectedPreviewIssues: preview.issues ?? [],
         selectedPreviewPublishable: Boolean(preview.publishable),
         selectedFileReady: Boolean(ready.is_ready),
@@ -254,12 +275,47 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
         selectedFileError: null,
       })
       saveLastSelectedFilePath(resolvedPath)
+      if (linkPreviewLoading) {
+        void (async () => {
+          try {
+            const response = await fetch(
+              `/api/catalog/link-preview?path=${encodeURIComponent(resolvedPath)}`
+            )
+            const raw = await response.text()
+            const metadataData = parseApiResponse(
+              response.status,
+              raw,
+              "catalog link preview API"
+            )
+            if (!response.ok || !metadataData?.ok) {
+              throw new Error(metadataData?.message ?? "failed to load link preview")
+            }
+            if (get().selectedFilePath !== resolvedPath) return
+            set({
+              selectedPreviewLink: metadataData.link_preview ?? linkPreview,
+              selectedPreviewLinkLoading: false,
+            })
+          } catch (error) {
+            if (get().selectedFilePath !== resolvedPath) return
+            set({
+              selectedPreviewLink: {
+                ...linkPreview,
+                metadata_error:
+                  error instanceof Error ? error.message : "unknown metadata error",
+              },
+              selectedPreviewLinkLoading: false,
+            })
+          }
+        })()
+      }
     } catch (err) {
       set({
         selectedFilePath: path,
         selectedFileContent: "",
         selectedPublishText: "",
         selectedPreviewMedia: [],
+        selectedPreviewLink: null,
+        selectedPreviewLinkLoading: false,
         selectedPreviewIssues: [],
         selectedPreviewPublishable: false,
         selectedFileReady: false,
@@ -280,6 +336,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
       selectedFileContent: "",
       selectedPublishText: "",
       selectedPreviewMedia: [],
+      selectedPreviewLink: null,
+      selectedPreviewLinkLoading: false,
       selectedPreviewIssues: [],
       selectedPreviewPublishable: false,
       selectedFileLoading: false,

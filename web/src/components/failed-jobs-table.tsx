@@ -49,7 +49,7 @@ export function FailedJobsTable({
       <Table className="mt-3 table-fixed">
         <TableHeader>
           <TableRow>
-            <TableHead className="w-[15rem] min-w-[15rem]">File</TableHead>
+            <TableHead className="w-[28rem] min-w-[15rem]">File</TableHead>
             <TableHead>Platform</TableHead>
             <TableHead>Schedule</TableHead>
             <TableHead>Actions</TableHead>
@@ -62,7 +62,7 @@ export function FailedJobsTable({
               className={selectedRowClass(selectedRowId === job.id)}
               onClick={() => onSelect(job)}
             >
-              <TableCell className="w-[15rem] min-w-[15rem] align-top">
+              <TableCell className="align-top">
                 <div className="flex flex-col gap-1">
                   <span className="break-words">
                     {fileNameFromPath(job.file_path)}

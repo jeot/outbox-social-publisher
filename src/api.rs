@@ -289,6 +289,7 @@ pub async fn run_server(host: String, port: u16, config: RuntimeConfig) -> ExitC
         .route("/api/catalog/tree", get(catalog_tree))
         .route("/api/catalog/file", get(catalog_file))
         .route("/api/catalog/preview", get(catalog_preview))
+        .route("/api/catalog/link-preview", get(catalog_link_preview))
         .route("/api/catalog/media", get(catalog_media))
         .route("/api/catalog/open", post(catalog_open))
         .route("/api/jobs/ready", get(ready_jobs))
@@ -450,6 +451,7 @@ async fn catalog_preview(State(state): State<ApiState>, Query(query): Query<File
     let media_refs = publish::extract_obsidian_embeds(&content);
     let media = publish::collect_media_preview(&requested, &media_refs, state.media_lookup_paths.as_slice());
     let issues = publish::preview_issues(&publish_text, &media);
+    let link_preview = crate::link_preview::preview_state(&publish_text, false);
 
     Json(json!({
         "ok": true,
@@ -458,10 +460,73 @@ async fn catalog_preview(State(state): State<ApiState>, Query(query): Query<File
             "publish_text": publish_text,
             "media_refs": media_refs,
             "media": media,
+            "link_preview": link_preview,
             "issues": issues,
             "publishable": issues.is_empty()
         }
     }))
+}
+
+async fn catalog_link_preview(
+    State(state): State<ApiState>,
+    Query(query): Query<FileQuery>,
+) -> Json<Value> {
+    let requested = PathBuf::from(&query.path);
+    if !is_valid_markdown_request(&requested, state.catalog_roots.as_slice()) {
+        return Json(json!({
+            "ok": false,
+            "message": "Path must be an absolute .md file inside configured catalog roots."
+        }));
+    }
+    let content = match fs::read_to_string(&requested) {
+        Ok(content) => content,
+        Err(error) => {
+            return Json(json!({
+                "ok": false,
+                "message": format!("Failed to read file: {error}")
+            }));
+        }
+    };
+    let publish_text = publish::extract_publish_text(&content);
+    let state_value = crate::link_preview::preview_state(&publish_text, false);
+    let mut link_preview = serde_json::to_value(&state_value)
+        .expect("serialize catalog link-preview state");
+    if let Some(url) = state_value
+        .url
+        .as_deref()
+        .and_then(|value| url::Url::parse(value).ok())
+    {
+        let metadata_result = reqwest::Client::builder()
+            .connect_timeout(state.runtime_config.connect_timeout)
+            .timeout(state.runtime_config.request_timeout)
+            .build()
+            .map_err(|error| error.to_string());
+        match metadata_result {
+            Ok(client) => match crate::link_preview::fetch_metadata(&client, &url).await {
+                Ok(metadata) => {
+                    if let Some(object) = link_preview.as_object_mut() {
+                        object.insert("title".to_string(), json!(metadata.title));
+                        object.insert("description".to_string(), json!(metadata.description));
+                        object.insert("thumbnail_url".to_string(), json!(metadata.image_url));
+                    }
+                }
+                Err(error) => {
+                    if let Some(object) = link_preview.as_object_mut() {
+                        object.insert(
+                            "metadata_error".to_string(),
+                            json!(error.to_output().message),
+                        );
+                    }
+                }
+            },
+            Err(error) => {
+                if let Some(object) = link_preview.as_object_mut() {
+                    object.insert("metadata_error".to_string(), json!(error));
+                }
+            }
+        }
+    }
+    Json(json!({ "ok": true, "link_preview": link_preview }))
 }
 
 async fn catalog_open(

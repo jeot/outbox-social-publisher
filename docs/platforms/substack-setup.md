@@ -65,6 +65,11 @@ Publo uses the same file contract as LinkedIn and X: publish text comes after th
 last `---`, and Obsidian `![[...]]` embeds are resolved as images. Supported image
 extensions are `.png`, `.jpg`, and `.jpeg`.
 
+The first HTTP(S) URL in publishable text is created as a Substack link attachment so the
+Note can render a link card. Link and image attachment IDs can coexist in one Note. Debug
+mode reports the detected URL and planned attachment placeholder without creating any
+remote attachment.
+
 The final create-Note request is never automatically retried. If the connection is
 lost after sending it, Publo reports an unknown outcome; inspect your Substack
 profile before publishing again.

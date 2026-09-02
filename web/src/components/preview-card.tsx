@@ -1,5 +1,7 @@
 import type { CSSProperties } from "react"
-import type { MediaPreview } from "@/store/catalogStore"
+import { ExternalLink, LoaderCircle } from "lucide-react"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import type { LinkPreview, MediaPreview } from "@/store/catalogStore"
 
 type PreviewCardProps = {
   selectedFilePath: string | null
@@ -10,6 +12,8 @@ type PreviewCardProps = {
   selectedFileError: string | null
   selectedPublishText: string
   selectedPreviewMedia: MediaPreview[]
+  selectedPreviewLink: LinkPreview | null
+  selectedPreviewLinkLoading: boolean
   selectedPreviewIssues: string[]
   className?: string
   style?: CSSProperties
@@ -24,6 +28,8 @@ export function PreviewCard({
   selectedFileError,
   selectedPublishText,
   selectedPreviewMedia,
+  selectedPreviewLink,
+  selectedPreviewLinkLoading,
   selectedPreviewIssues,
   className,
   style,
@@ -63,6 +69,61 @@ export function PreviewCard({
                 <p className="whitespace-pre-wrap break-words text-md leading-relaxed">
                   {selectedPublishText || "(empty)"}
                 </p>
+                {selectedPreviewLink?.status === "found" && selectedPreviewLink.url ? (
+                  <Card size="sm" className="border-primary/30 bg-primary/5">
+                    {selectedPreviewLink.thumbnail_url ? (
+                      <img
+                        src={selectedPreviewLink.thumbnail_url}
+                        alt=""
+                        className="aspect-[1.91/1] w-full object-cover"
+                        loading="lazy"
+                      />
+                    ) : null}
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <ExternalLink className="size-4" />
+                        Link preview
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-1">
+                      {selectedPreviewLinkLoading ? (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <LoaderCircle className="size-3.5 animate-spin" />
+                          Loading link preview…
+                        </div>
+                      ) : null}
+                      {selectedPreviewLink.title ? (
+                        <p className="text-sm font-semibold">
+                          {selectedPreviewLink.title}
+                        </p>
+                      ) : null}
+                      {selectedPreviewLink.description ? (
+                        <p className="line-clamp-3 text-xs text-muted-foreground">
+                          {selectedPreviewLink.description}
+                        </p>
+                      ) : null}
+                      <p className="text-xs font-medium text-muted-foreground">
+                        {selectedPreviewLink.domain ?? "External link"}
+                      </p>
+                      <a
+                        href={selectedPreviewLink.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block break-all text-sm text-primary underline-offset-4 hover:underline"
+                      >
+                        {selectedPreviewLink.url}
+                      </a>
+                      <p className="text-xs text-muted-foreground">
+                        Attached to Substack Notes and to LinkedIn posts without native images.
+                      </p>
+                      {selectedPreviewLink.metadata_error ? (
+                        <p className="text-xs text-amber-700 dark:text-amber-400">
+                          Metadata unavailable; the URL was still detected.
+                        </p>
+                      ) : null}
+                    </CardContent>
+                  </Card>
+                ) : null}
                 {previewImages.length > 0 ? (
                   <div className="space-y-2">
                     {previewImages.map((item, idx) => (

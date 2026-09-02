@@ -9,6 +9,10 @@ export function PreviewSidebar() {
   const roots = useCatalogStore((state) => state.roots)
   const selectedPublishText = useCatalogStore((state) => state.selectedPublishText)
   const selectedPreviewMedia = useCatalogStore((state) => state.selectedPreviewMedia)
+  const selectedPreviewLink = useCatalogStore((state) => state.selectedPreviewLink)
+  const selectedPreviewLinkLoading = useCatalogStore(
+    (state) => state.selectedPreviewLinkLoading
+  )
   const selectedPreviewIssues = useCatalogStore((state) => state.selectedPreviewIssues)
   const selectedPreviewPublishable = useCatalogStore(
     (state) => state.selectedPreviewPublishable
@@ -43,6 +47,8 @@ export function PreviewSidebar() {
         selectedFileError={selectedFileError}
         selectedPublishText={selectedPublishText}
         selectedPreviewMedia={selectedPreviewMedia}
+        selectedPreviewLink={selectedPreviewLink}
+        selectedPreviewLinkLoading={selectedPreviewLinkLoading}
         selectedPreviewIssues={selectedPreviewIssues}
         className="flex min-h-0 flex-col rounded-xl border bg-card"
       />

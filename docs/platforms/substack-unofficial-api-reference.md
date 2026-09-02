@@ -24,6 +24,7 @@ Verification status as of August 31, 2026:
 | `getAuthenticatedProfile()` | `GET https://substack.com/api/v1/handle/options`, then `GET /api/v1/user/{handle}/public_profile` |
 | `uploadImage(dataUrl)` | `POST https://substack.com/api/v1/image` with `{ "image": "data:<mime>;base64,..." }` |
 | `createImageAttachment(image)` | `POST https://substack.com/api/v1/comment/attachment/` with `{ "url": image.url, "type": "image" }` |
+| `createAttachment({ type: "link", url })` | `POST https://substack.com/api/v1/comment/attachment/` with `{ "url": url, "type": "link" }` |
 | `publishNote(request)` | `POST https://substack.com/api/v1/comment/feed/` |
 
 All requests send `Accept: application/json` and the cookie

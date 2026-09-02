@@ -186,6 +186,23 @@ impl SubstackClient {
         })
     }
 
+    pub(crate) async fn create_link_attachment(&self, url: &Url) -> Result<String, AppError> {
+        let response = self
+            .request(
+                Method::POST,
+                "comment/attachment/",
+                Some(json!({ "url": url.as_str(), "type": "link" })),
+                false,
+            )
+            .await?;
+        extract_id(&response.body).ok_or_else(|| AppError::Http {
+            message: "Substack link attachment response did not include an ID.".to_string(),
+            status: Some(502),
+            api_error: Some(response.body),
+            retryable: false,
+        })
+    }
+
     pub(crate) async fn publish_note(
         &self,
         body_json: Value,
@@ -352,10 +369,17 @@ pub(crate) fn build_note_body(text: &str) -> Result<Value, AppError> {
     }))
 }
 
-pub(crate) fn note_payload_preview(body_json: Value, media_count: usize) -> Value {
-    let attachment_ids = (0..media_count)
+pub(crate) fn note_payload_preview(
+    body_json: Value,
+    media_count: usize,
+    has_link_preview: bool,
+) -> Value {
+    let mut attachment_ids = (0..media_count)
         .map(|index| format!("<resolved-via-substack-image-attachment-{}>", index + 1))
         .collect::<Vec<_>>();
+    if has_link_preview {
+        attachment_ids.push("<resolved-via-substack-link-attachment>".to_string());
+    }
     let mut payload = json!({
         "bodyJson": body_json,
         "tabId": "for-you",
@@ -514,8 +538,21 @@ mod tests {
         std::fs::remove_file(image_path).expect("remove test image");
         assert_eq!(receipt.id.as_deref(), Some("303"));
 
+        let link = Url::parse("https://writer.substack.com/p/article").unwrap();
+        let link_attachment_id = client
+            .create_link_attachment(&link)
+            .await
+            .expect("create link attachment");
+        client
+            .publish_note(
+                build_note_body("Read https://writer.substack.com/p/article").unwrap(),
+                vec![link_attachment_id],
+            )
+            .await
+            .expect("publish note with link attachment");
+
         let calls = state.calls.lock().await;
-        assert_eq!(calls.len(), 6);
+        assert_eq!(calls.len(), 8);
         assert!(
             calls
                 .iter()
@@ -529,6 +566,11 @@ mod tests {
             json!({ "url": "https://cdn.example/image.png", "type": "image" })
         );
         assert_eq!(calls[5].1["attachmentIds"], json!(["attachment-1"]));
+        assert_eq!(
+            calls[6].1,
+            json!({ "url": "https://writer.substack.com/p/article", "type": "link" })
+        );
+        assert_eq!(calls[7].1["attachmentIds"], json!(["attachment-1"]));
     }
 
     #[tokio::test]

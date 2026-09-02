@@ -64,3 +64,20 @@ Utilities:
 publo auth linkedin token-status
 publo auth linkedin token-refresh
 ```
+
+## Link previews
+
+Publo treats the first HTTP(S) URL in publishable text as the link-preview candidate. For
+a LinkedIn post without native images, it loads the page's Open Graph metadata and sends
+an explicit article attachment with title, description, source URL, and an uploaded
+thumbnail when available. LinkedIn does not automatically scrape URLs submitted through
+the Posts API.
+
+Native `![[...]]` images take precedence. In that case the URL remains clickable text and
+debug output reports `link_preview.status = "suppressed_by_media"`.
+
+Inspect the detected URL, fetched metadata, and planned payload without publishing:
+
+```bash
+publo publish linkedin --file ./post-with-link.md --debug
+```

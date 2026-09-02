@@ -63,6 +63,12 @@ Support file-driven media publishing while preserving Obsidian-friendly authorin
 - [x] Add LinkedIn single-image upload flow (`rest/images initializeUpload` + upload + `rest/posts` media content).
 - [x] Add LinkedIn multi-image publish support (MultiImage API, 2-20 images).
 - [x] Add X image upload/publish support (1-4 images via media upload + `media_ids`).
+- [x] Detect the first HTTP(S) URL in publishable text as a deterministic link-preview candidate.
+- [x] Add LinkedIn article-card publishing with explicit title, description, and optional uploaded Open Graph thumbnail.
+- [x] Add Substack Note link attachments, including Notes that also contain image attachments.
+- [x] Expose link-preview detection and planned provider payloads in CLI debug, worker preflight, and GUI preview.
+- [x] Add deterministic URL, metadata, LinkedIn payload, and Substack attachment contract tests.
+- [ ] Complete supervised live verification of one LinkedIn article card and one Substack Note link card.
 
 ## Phase 4 - State Model Foundation (SQLite + Lifecycle)
 
